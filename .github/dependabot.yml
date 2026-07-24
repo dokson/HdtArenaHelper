@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Keep the CI workflow actions current (also clears the Node.js runtime deprecations).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+
+  # NuGet dependencies (xUnit in the tests, Math.NET Numerics in the training tool).
+  # The HDT/HearthMirror/HearthDb/Newtonsoft references are HintPath'd, not NuGet, so
+  # Dependabot leaves them alone.
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
