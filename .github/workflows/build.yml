@@ -16,7 +16,7 @@ jobs:
       # Pinned official HDT version whose reference assemblies we build against.
       HDT_VERSION: '1.53.14'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-dotnet@v4
         with:
