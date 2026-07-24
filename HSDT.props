@@ -1,0 +1,16 @@
+<Project>
+  <!--
+    Locates the installed Hearthstone Deck Tracker so the project can reference the
+    assemblies it ships. HDT is a Squirrel app: its binaries live in the newest
+    %LocalAppData%\HearthstoneDeckTracker\app-<version> folder.
+
+    Override by passing /p:HSDTPath=... to MSBuild (CI does this after downloading a
+    pinned official HDT release). The auto-discovery below only runs when HSDTPath was
+    NOT supplied and a local install actually exists, so CI builds don't trip over a
+    missing %LocalAppData% folder.
+  -->
+  <PropertyGroup Condition="'$(HSDTPath)' == '' and Exists('$(LocalAppData)\HearthstoneDeckTracker')">
+    <HSDTPathLength>$([MSBuild]::Subtract($([System.IO.Directory]::GetDirectories(`$(LocalAppData)\HearthstoneDeckTracker`, `app-*`).Length), 1))</HSDTPathLength>
+    <HSDTPath>$([System.IO.Directory]::GetDirectories(`$(LocalAppData)\HearthstoneDeckTracker`, `app-*`)[$(HSDTPathLength)])</HSDTPath>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\Version.props" Condition="Exists('..\Version.props')" />
+  <Import Project="..\HSDT.props" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>HdtArenaHelper.Training</AssemblyName>
+    <RootNamespace>HdtArenaHelper.Training</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+  </ItemGroup>
+
+  <!-- Reuse the plugin's BuildFeatures (shared, so train/inference features can't drift). -->
+  <ItemGroup>
+    <ProjectReference Include="..\HdtArenaHelper\HdtArenaHelper.csproj" />
+  </ItemGroup>
+
+  <!-- HDT-shipped assemblies (HearthDb metadata + the plugin's own references). -->
+  <ItemGroup>
+    <Reference Include="HearthstoneDeckTracker">
+      <HintPath>$(HSDTPath)\HearthstoneDeckTracker.exe</HintPath>
+      <Private>True</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="HearthDb">
+      <HintPath>$(HSDTPath)\HearthDb.dll</HintPath>
+      <Private>True</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="HearthMirror">
+      <HintPath>$(HSDTPath)\HearthMirror.dll</HintPath>
+      <Private>True</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(HSDTPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>True</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+  </ItemGroup>
+
+</Project>

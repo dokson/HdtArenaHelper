@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    Applied to every project in the repo. Enforce the .editorconfig code-style rules
+    at build time (not just in the IDE) so, e.g., IDE0005 "unused using directive" is
+    reported by `dotnet build` and CI — no dead imports slip through.
+
+    IDE0005 only fires during build when the XML documentation file is generated, so we
+    enable that and suppress CS1591 (missing doc comment) to avoid unrelated noise.
+  -->
+  <PropertyGroup>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+</Project>

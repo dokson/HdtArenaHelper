@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build-test-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Pinned official HDT version whose reference assemblies we build against.
+      HDT_VERSION: '1.53.14'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve pinned HDT reference assemblies
+        id: hdt
+        shell: pwsh
+        run: |
+          $path = .\scripts\resolve-hdt.ps1 -Version $env:HDT_VERSION
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Read plugin version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = .\scripts\get-version.ps1
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build HdtArenaHelper.sln -c Release -warnaserror "/p:HSDTPath=${{ steps.hdt.outputs.path }}"
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test HdtArenaHelper.Tests/HdtArenaHelper.Tests.csproj -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" --no-build
+
+      - name: Package release zip
+        id: pkg
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.ver.outputs.version }}'
+          $stage = "dist/HdtArenaHelper"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "HdtArenaHelper/bin/Release/HdtArenaHelper.dll" $stage
+          $zip = "dist/HdtArenaHelper-$ver.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HdtArenaHelper-${{ steps.ver.outputs.version }}
+          path: ${{ steps.pkg.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release on version tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $expected = "v${{ steps.ver.outputs.version }}"
+          if ($tag -ne $expected) {
+            throw "Pushed tag $tag does not match project version $expected."
+          }
+          gh release create $tag '${{ steps.pkg.outputs.zip }}' `
+            --repo '${{ github.repository }}' --title $tag --generate-notes --latest
+          if ($LASTEXITCODE -ne 0) { throw "Failed to publish GitHub release $tag." }

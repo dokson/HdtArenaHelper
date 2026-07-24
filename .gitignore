@@ -1,0 +1,39 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.pdb
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# NuGet
+*.nupkg
+packages/
+project.lock.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local cached data downloaded at runtime (never commit)
+*.cache
+hsreplay_*.json
+
+# Trainer output — regenerate with HdtArenaHelper.Training.
+# The committed model is HdtArenaHelper.Training/arena_weights.json.
+/HdtArenaHelper.Training/arena_weights.generated.json
+
+# CI: pinned HDT reference assemblies downloaded by scripts/resolve-hdt.ps1
+/.hdt/
+# CI: packaged release zips
+/dist/
+# Editor / tooling local state
+.claude/
+.codegraph/

@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repository (matches .editorconfig and the
+# pre-commit hook, which blocks CRLF on staged lines).
+* text=auto eol=lf
+
+# Binary assets — never normalized.
+*.png binary
+*.ico binary
+*.gz binary
+*.nupkg binary

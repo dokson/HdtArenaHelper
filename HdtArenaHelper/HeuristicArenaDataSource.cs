@@ -1,0 +1,280 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using HearthDb;
+using HearthDb.Enums;
+using Newtonsoft.Json.Linq;
+
+// The training tool builds its design matrix from the same BuildFeatures below, so
+// training and inference can never disagree on what a card's features are.
+[assembly: InternalsVisibleTo("HdtArenaHelper.Training")]
+
+namespace HdtArenaHelper
+{
+	/// <summary>
+	/// A fully-offline base "arena value" score computed from card metadata that
+	/// HDT already ships (HearthDb). No network, no paywall, no scraping.
+	///
+	/// The model weights are the SINGLE SOURCE OF TRUTH produced by the offline training
+	/// tool (<c>arena_weights.json</c>), embedded into this assembly at build time and
+	/// loaded here — no coefficients are duplicated in code, and <see cref="BuildFeatures"/>
+	/// is shared with training so the feature vectors can't drift. To re-fit for a new
+	/// rotation/patch, re-run the trainer to regenerate that file and rebuild.
+	///
+	/// The weights were fit by ridge regression against real arena win-rates
+	/// (HSReplay + Firestone public data, win-rate centered on each class's average so
+	/// the score measures card value, not class strength). Out-of-fold Spearman vs real
+	/// win-rates is ~0.27 — a weak signal in absolute terms, so this only ranks cards
+	/// the real win-rate data has not covered; it must not override a solid win-rate.
+	/// The raw formula predicts win-rate points relative to an average card of the same
+	/// class; weights describe the CURRENT card pool, not universal keyword values.
+	/// </summary>
+	public class HeuristicArenaDataSource : IArenaDataSource
+	{
+		// Embedded training output (see the csproj EmbeddedResource).
+		private const string WeightsResource = "HdtArenaHelper.arena_weights.json";
+		private static readonly ArenaWeights Model = ArenaWeights.LoadEmbedded(WeightsResource);
+
+		private readonly Dictionary<int, Card> _byDbfId = new Dictionary<int, Card>();
+
+		public HeuristicArenaDataSource(double weight = 1.0)
+		{
+			Weight = weight;
+			foreach(var kv in Cards.All)
+			{
+				var dbf = kv.Value.DbfId;
+				if(dbf != 0 && !_byDbfId.ContainsKey(dbf))
+					_byDbfId[dbf] = kv.Value;
+			}
+		}
+
+		public string Name => "Heuristic";
+		public double Weight { get; }
+		public bool IsLoaded => true; // pure computation over bundled card data
+
+		public Task EnsureLoadedAsync() => Task.CompletedTask;
+
+		public double? GetNormalizedScore(int dbfId)
+		{
+			if(!_byDbfId.TryGetValue(dbfId, out var card))
+				return null;
+
+			// Class-pick hero skins are rated by the win-rate source's class tier.
+			if(card.Id.StartsWith("HERO_", StringComparison.Ordinal))
+				return null;
+
+			double raw;
+			try { raw = Model.Score(BuildFeatures(card)); }
+			catch { return null; }
+
+			// Display mapping onto the 0-100 blend scale: the median draftable card
+			// (-0.28 raw) sits at 50, each win-rate point is worth 15. The model weights
+			// come from the json; this anchor/slope is the source's presentation choice.
+			return Clamp(50 + 15 * (raw + 0.28));
+		}
+
+		/// <summary>
+		/// The ridge-model feature vector for a card (feature name → value). Shared by the
+		/// plugin (inference) and the training tool (fitting), so the two never diverge.
+		/// The learned coefficient for each feature lives only in <c>arena_weights.json</c>.
+		/// Units follow the training set: win-rate percentage points vs the average card of
+		/// the same class.
+		/// </summary>
+		internal static IReadOnlyDictionary<string, double> BuildFeatures(Card card)
+		{
+			var f = new Dictionary<string, double>();
+
+			var cost = card.Cost;
+			var attack = card.Attack;
+			// HearthstoneJSON (the training source) stores weapon durability in its own
+			// field; HearthDb mirrors it in Durability. Hero cards keep their 30 health:
+			// the training saw the same, so the is_hero weight was fit net of that.
+			var health = card.Type == CardType.WEAPON && card.Durability != 0
+				? card.Durability
+				: card.Health;
+			var text = CleanText(card);
+
+			f["cost"] = cost;
+			f["attack"] = attack;
+			f["health"] = health;
+
+			switch(card.Type)
+			{
+				case CardType.MINION:
+					f["is_minion"] = 1;
+					f["statline"] = attack + health - (2 * cost + 1);
+					f["stat_per_mana"] = (attack + health) / (double)(cost + 1);
+					break;
+				case CardType.SPELL:
+					f["is_spell"] = 1;
+					break;
+				case CardType.WEAPON:
+					f["is_weapon"] = 1;
+					f["weapon_value"] = attack * health - (2 * cost + 1);
+					break;
+				case CardType.LOCATION:
+					f["is_loc"] = 1;
+					break;
+				case CardType.HERO:
+					f["is_hero"] = 1;
+					break;
+			}
+
+			if(card.Class == CardClass.NEUTRAL)
+				f["is_neutral"] = 1;
+
+			// rarity_ord is the ordinal (rare=1, epic=2, legendary=3); legendaries carry
+			// an extra is_legendary term, matching the training feature set.
+			switch(card.Rarity)
+			{
+				case Rarity.RARE: f["rarity_ord"] = 1; break;
+				case Rarity.EPIC: f["rarity_ord"] = 2; break;
+				case Rarity.LEGENDARY: f["rarity_ord"] = 3; f["is_legendary"] = 1; break;
+			}
+
+			if(card.Race != Race.INVALID)
+				f["has_tribe"] = 1;
+
+			AddKeywordFeatures(card, text, f);
+			AddTextFeatures(text, cost, f);
+			return f;
+		}
+
+		// Training counted a keyword when it appeared in the card's mechanics OR was
+		// referenced by its text, so text matching is the faithful port (HearthDb's
+		// Mechanics array alone is too sparse).
+		private static void AddKeywordFeatures(Card card, string text, IDictionary<string, double> f)
+		{
+			if(card.Taunt || Has(text, @"\btaunt\b")) f["kw_taunt"] = 1;
+			if(card.DivineShield || Has(text, "divine shield")) f["kw_divine_shield"] = 1;
+			if(Has(text, @"\brush\b")) f["kw_rush"] = 1;
+			if(Has(text, @"\bcharge\b")) f["kw_charge"] = 1;
+			if(Has(text, @"\blifesteal\b")) f["kw_lifesteal"] = 1;
+			if(card.Windfury || Has(text, @"\bwindfury\b")) f["kw_windfury"] = 1;
+			if(card.Poisonous || Has(text, @"\bpoisonous\b")) f["kw_poisonous"] = 1;
+			if(Has(text, @"\bbattlecry\b")) f["kw_battlecry"] = 1;
+			if(card.Deathrattle || Has(text, @"\bdeathrattle\b")) f["kw_deathrattle"] = 1;
+			if(Has(text, @"\bdiscover\b")) { f["kw_discover"] = 1; f["tx_discover"] = 1; }
+			if(card.Reborn || Has(text, @"\breborn\b")) f["kw_reborn"] = 1;
+			if(Has(text, @"\bstealth\b")) f["kw_stealth"] = 1;
+			if(Has(text, "spell damage")) f["kw_spellpower"] = 1;
+			if(Has(text, @"\bcombo\b")) f["kw_combo"] = 1;
+			if(Has(text, @"\bsecret\b")) f["kw_secret"] = 1;
+			if(Has(text, @"\bfreeze\b|\bfrozen\b")) f["kw_freeze"] = 1;
+			if(Has(text, @"\btradeable\b")) f["kw_tradeable"] = 1;
+			if(Has(text, @"\bforge\b")) f["kw_forge"] = 1;
+			if(Has(text, @"\bmagnetic\b")) f["kw_magnetic"] = 1;
+			if(Has(text, @"\boutcast\b")) f["kw_outcast"] = 1;
+			if(Has(text, @"\bcolossal\b")) f["kw_colossal"] = 1;
+			if(Has(text, @"\becho\b")) f["kw_echo"] = 1;
+		}
+
+		private static void AddTextFeatures(string text, int cost, IDictionary<string, double> f)
+		{
+			if(Has(text, @"\bdraws?\b")) f["tx_draw"] = 1;
+			if(Has(text, @"destroy (a|an|the|all)?\s*(enemy )?minion")) f["tx_destroy_minion"] = 1;
+			if(Has(text, @"\ball (enemy )?minions\b|\ball enemies\b|\bto all\b")) f["tx_aoe"] = 1;
+			if(Has(text, "summon")) f["tx_summon"] = 1;
+			if(Has(text, @"add (a|an|two|three|\d).{0,40}to your hand|copy of")) f["tx_gain_card"] = 1;
+			if(Has(text, @"costs? \(?\d+\)? less|reduce.{0,20}cost")) f["tx_mana_cheat"] = 1;
+			if(Has(text, "at the (end|start) of|whenever|after you")) f["tx_persistent"] = 1;
+			if(Has(text, "random")) f["tx_random"] = 1;
+			if(Has(text, "transform")) f["tx_transform"] = 1;
+			if(Has(text, "silence")) f["tx_silence"] = 1;
+			if(Has(text, @"\d+ armor")) f["tx_armor"] = 1;
+
+			// magnitudes: biggest damage / heal number in the text
+			var dmg = MaxNumber(text, @"deals?\s+\$?(\d+)\s+damage");
+			if(dmg != 0)
+			{
+				f["tx_damage_amt"] = dmg;
+				f["tx_dmg_per_mana"] = dmg / (double)(cost + 1);
+			}
+			var heal = MaxNumber(text, @"restore\s+#?(\d+)\s+health");
+			if(heal != 0)
+				f["tx_restore_amt"] = heal;
+		}
+
+		private static readonly Regex Markup = new Regex(@"<[^>]+>|\[x\]", RegexOptions.Compiled);
+
+		private static string CleanText(Card card)
+		{
+			var text = card.GetLocText(Locale.enUS) ?? "";
+			return Markup.Replace(text, " ").ToLowerInvariant();
+		}
+
+		private static bool Has(string text, string pattern) => Regex.IsMatch(text, pattern);
+
+		private static int MaxNumber(string text, string pattern)
+		{
+			var max = 0;
+			foreach(Match m in Regex.Matches(text, pattern))
+			{
+				if(int.TryParse(m.Groups[1].Value, out var n) && n > max)
+					max = n;
+			}
+			return max;
+		}
+
+		private static double Clamp(double v) => Math.Max(0, Math.Min(100, v));
+	}
+
+	/// <summary>
+	/// The ridge model (intercept + per-feature coefficients) loaded from the embedded
+	/// <c>arena_weights.json</c>. Unknown features read as 0, so a weight dropped by the
+	/// training pipeline simply contributes nothing.
+	/// </summary>
+	internal sealed class ArenaWeights
+	{
+		private readonly IReadOnlyDictionary<string, double> _weights;
+
+		public double Intercept { get; }
+
+		public double this[string feature]
+			=> _weights.TryGetValue(feature, out var v) ? v : 0.0;
+
+		private ArenaWeights(double intercept, IReadOnlyDictionary<string, double> weights)
+		{
+			Intercept = intercept;
+			_weights = weights;
+		}
+
+		/// <summary>intercept + Σ weight[feature] · value[feature].</summary>
+		public double Score(IReadOnlyDictionary<string, double> features)
+		{
+			var score = Intercept;
+			foreach(var kv in features)
+				score += this[kv.Key] * kv.Value;
+			return score;
+		}
+
+		public static ArenaWeights LoadEmbedded(string resourceName)
+		{
+			try
+			{
+				var assembly = typeof(ArenaWeights).Assembly;
+				using(var stream = assembly.GetManifestResourceStream(resourceName))
+				{
+					if(stream == null)
+						throw new InvalidOperationException($"Embedded weights '{resourceName}' not found.");
+					using(var reader = new StreamReader(stream))
+					{
+						var root = JObject.Parse(reader.ReadToEnd());
+						var intercept = (double?)root["intercept"] ?? 0.0;
+						var weights = root["weights"]?.ToObject<Dictionary<string, double>>()
+							?? new Dictionary<string, double>();
+						return new ArenaWeights(intercept, weights);
+					}
+				}
+			}
+			catch(Exception ex)
+			{
+				Hearthstone_Deck_Tracker.Utility.Logging.Log.Error("[ArenaHelper] weights load failed: " + ex);
+				return new ArenaWeights(0.0, new Dictionary<string, double>());
+			}
+		}
+	}
+}

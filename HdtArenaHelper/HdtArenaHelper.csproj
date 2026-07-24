@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\Version.props" />
+  <Import Project="..\HSDT.props" />
+
+  <PropertyGroup>
+    <AssemblyTitle>HdtArenaHelper</AssemblyTitle>
+    <Product>HDT Arena Helper</Product>
+    <RootNamespace>HdtArenaHelper</RootNamespace>
+    <AssemblyName>HdtArenaHelper</AssemblyName>
+    <ProjectGuid>{6F9B1C2A-8E4D-4B3A-9F1E-2C5D7A8B3E10}</ProjectGuid>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+    <!-- Do not copy HDT's own assemblies into our output. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!-- Launch HDT when debugging (F5). -->
+  <PropertyGroup>
+    <StartAction>Program</StartAction>
+    <StartProgram>$(HSDTPath)\HearthstoneDeckTracker.exe</StartProgram>
+  </PropertyGroup>
+
+  <!-- Expose pure internal helpers (e.g. DraftWatcher.ToDbfId) to the test project. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="HdtArenaHelper.Tests" />
+  </ItemGroup>
+
+  <!-- Assemblies shipped with HDT: reference them, never redistribute them. -->
+  <ItemGroup>
+    <Reference Include="HearthstoneDeckTracker">
+      <HintPath>$(HSDTPath)\HearthstoneDeckTracker.exe</HintPath>
+      <Private>False</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="HearthMirror">
+      <HintPath>$(HSDTPath)\HearthMirror.dll</HintPath>
+      <Private>False</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="HearthDb">
+      <HintPath>$(HSDTPath)\HearthDb.dll</HintPath>
+      <Private>False</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(HSDTPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+      <SpecificVersion>False</SpecificVersion>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    The heuristic model weights, authored by the HdtArenaHelper.Training tool. This is the
+    single source of truth: it is embedded straight from where the trainer writes it (no
+    copy), and HeuristicArenaDataSource reads it via GetManifestResourceStream.
+    Re-fit = re-run the trainer and rebuild.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\HdtArenaHelper.Training\arena_weights.json"
+                      Link="arena_weights.json"
+                      LogicalName="HdtArenaHelper.arena_weights.json" />
+  </ItemGroup>
+
+  <!-- After a local (non-CI) build, drop the plugin straight into HDT's Plugins folder. -->
+  <Target Name="InstallToHdt" AfterTargets="Build" Condition=" '$(CI)' != 'true' ">
+    <Copy SourceFiles="$(TargetDir)HdtArenaHelper.dll"
+          DestinationFolder="$(APPDATA)\HearthstoneDeckTracker\Plugins\HdtArenaHelper"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
