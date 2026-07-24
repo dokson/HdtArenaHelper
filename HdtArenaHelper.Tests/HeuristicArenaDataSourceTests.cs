@@ -26,22 +26,25 @@ namespace HdtArenaHelper.Tests
 		/// re-running the trainer and reading the scores.
 		/// </summary>
 		[Theory]
-		[InlineData("LOOT_413", 36.50)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 39.20)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 34.55)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 48.50)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 48.65)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 34.25)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 50.45)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 55.85)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 24.20)]  // Dark Iron Dwarf - conditional buff
-		[InlineData("NEW1_030", 13.89)] // Deathwing - near the floor
+		[InlineData("LOOT_413", 35.70)] // Plated Beetle - vanilla-ish minion
+		[InlineData("CS2_189", 39.73)]  // Elven Archer - battlecry damage
+		[InlineData("EX1_093", 33.83)]  // Defender of Argus - buff + taunt text
+		[InlineData("CS2_106", 49.55)]  // Fiery War Axe - weapon path
+		[InlineData("CS2_029", 49.43)]  // Fireball - spell with damage magnitude
+		[InlineData("EX1_050", 33.65)]  // Coldlight Oracle - draw text
+		[InlineData("GIL_828", 51.05)]  // Dire Frenzy - buff spell
+		[InlineData("CS2_235", 57.65)]  // Northshire Cleric - persistent draw
+		[InlineData("EX1_046", 24.29)]  // Dark Iron Dwarf - conditional buff
+		[InlineData("NEW1_030", 11.52)] // Deathwing - near the floor
 		public void Matches_training_golden_scores(string cardId, double expected)
 		{
 			var score = Source.GetNormalizedScore(Dbf(cardId));
 
 			Assert.NotNull(score);
-			Assert.Equal(expected, score!.Value.Score, 2);
+			// Tolerance = half the trainer's printed precision (0.00): digit-rounding
+			// comparison would disagree on exact midpoints (the trainer prints
+			// half-away-from-zero, xUnit rounds half-to-even — e.g. a true 39.725).
+			Assert.Equal(expected, score!.Value.Score, 0.005);
 		}
 
 		[Fact]
@@ -68,7 +71,7 @@ namespace HdtArenaHelper.Tests
 			// Golden from the training tool.
 			var score = Source.GetNormalizedScore(Dbf("ICC_833")); // Frost Lich Jaina
 			Assert.NotNull(score);
-			Assert.Equal(80.15, score!.Value.Score, 2);
+			Assert.Equal(78.35, score!.Value.Score, 0.005);
 		}
 
 		/// <summary>

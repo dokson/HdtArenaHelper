@@ -6,11 +6,18 @@ name: dependabot-automerge
 # protection or repo auto-merge settings. All Dependabot deps here are dev/CI-only
 # (test SDK, Math.NET in training, actions) — none ship in the plugin DLL — so a
 # bad bump can only fail CI, which blocks this merge.
+#
+# The `branches` filter matches the HEAD branch of the triggering build run:
+# Dependabot always works on dependabot/** branches, so builds for pushes to main
+# or human PRs never even instantiate this workflow (no "skipped" noise in the
+# Actions list). The job-level actor check below stays as defence in depth for a
+# human branch that happens to be named dependabot/*.
 
 on:
   workflow_run:
     workflows: [build]
     types: [completed]
+    branches: ['dependabot/**']
 
 permissions:
   contents: write
