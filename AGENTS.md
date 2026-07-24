@@ -12,8 +12,9 @@ computes a **single blended 0–100 score** for each, and shows them in an overl
 **live-verified on a real HDT client**. The overlay hosts HDT's native `ArenaPlaque`, scales
 with the client (a `Viewbox` design-space, so resize/DPI are automatic), hides when HS is
 minimised, and covers the card draft, the hero/class pick, and the Underground "legendary
-group" pick (cumulative scoring). The synergy engine is designed but not yet implemented (a
-`NullSynergyEngine` is wired in).
+group" pick (cumulative scoring). Two independent win-rate sources (HSReplay + Firestone)
+blend at runtime, cards are scored in the drafted class's context when known, and a
+bounded metadata synergy engine (`MetadataSynergyEngine`) nudges deck-fit.
 
 ## Data sources & ethics
 
@@ -22,9 +23,9 @@ bundle/redistribute anyone's proprietary tier data.
 
 | Source | What | Status |
 |---|---|---|
-| HSReplay arena `api/v1/arena/card_stats/free/` | Real arena win-rate / popularity per card + class tier list | ✅ used (primary) |
+| HSReplay arena `api/v1/arena/card_stats/free/` | Real arena win-rate / popularity per card + class tier list | ✅ used (win-rate consensus with Firestone, 0.5 each) |
 | HearthDb (bundled with HDT) | Card metadata for the offline heuristic + id resolution | ✅ used, offline |
-| Firestone public arena CDN | Real arena win-rate per class | ✅ used offline in `training/` (weight fitting); ⭐ planned as runtime source |
+| Firestone public arena CDN | Real arena win-rate per class | ✅ used at runtime (second win-rate source) + offline in `training/` (weight fitting) |
 
 The HSReplay endpoint **403s .NET's HTTP stack**: Cloudflare fingerprints the TLS
 ClientHello, and a browser User-Agent alone is NOT enough (verified — `WebClient` and
@@ -32,6 +33,12 @@ ClientHello, and a browser User-Agent alone is NOT enough (verified — `WebClie
 (bundled in `%SystemRoot%\System32` on Windows 10 1803+), with a fail-soft `WebClient`
 fallback. `--compressed` keeps it ~100 KB on the wire. Cache downloads with a 1-day TTL; do
 not hammer. See `HsReplayArenaDataSource.DownloadWithCurlAsync`.
+
+The scheduled retrain (`train.yml`) fetches the same endpoints from GitHub runners
+**once a week** — a single ~100 KB HSReplay request plus the 11 Firestone CDN files.
+Keep it weekly and single-shot: automated traffic must stay well below anything that
+could read as abuse of a free endpoint. If HSReplay ever blocks runner IPs, drop the
+schedule to manual `workflow_dispatch` rather than working around the block.
 
 ## Scoring model
 
@@ -41,19 +48,40 @@ finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  sy
 
 - **`IArenaDataSource`** — a rating provider. Each normalizes its metric to 0–100 so
   heterogeneous signals (win-rate %, heuristic points) can be merged.
-  - `HsReplayArenaDataSource` — real arena win-rate, the primary signal. Pipeline:
+  - `HsReplayArenaDataSource` — real arena win-rate, half of the win-rate consensus. Pipeline:
     `drawn_win_rate` (less deck-confounded than included win-rate) → empirical-Bayes
     shrinkage toward the global mean (low-sample cards regress; no hard games cutoff) →
     logistic anchored at the robust **median** (MAD scale), so the median card maps to 50
     and outliers can't rescale it. Per-class buckets get the same treatment into a
     **class tier list** (unweighted shrunk mean, *not* games-weighted) used to score the
-    `HERO_*` skins at the hero pick, so the overlay doubles as a class picker.
+    `HERO_*` skins at the hero pick, so the overlay doubles as a class picker. Once the
+    drafted class is known (threaded as `CardClass` through `GetNormalizedScore`), a card
+    is scored from **that class's bucket**: rate shrunk toward a **leave-that-class-out**
+    prior (a prior containing the observation would double-count it), mapped on the SAME
+    ALL-anchored scale as the fallback scores so mixed picks stay comparable. Backtested
+    cross-source (truth = the other source's class rate): class estimator beats plain ALL,
+    pooled Spearman 0.73 vs 0.53, MAE 3.4 vs 3.9.
+  - `FirestoneArenaDataSource` — the second real win-rate source: the 11 per-class CDN
+    files, metric `drawnThenWin/drawn` (same drawn-win-rate quantity as HSReplay), same
+    shared pipeline (`ScoreMath`) and the same LOO/shared-scale treatment, pooled across
+    classes when the class is unknown (noise floor applied on the pooled sample). Plain
+    .NET fetch (static CDN, no Cloudflare fingerprinting), one cached file per class;
+    classes fail soft independently and missing ones are retried by the warm-up loop
+    (`IsLoaded` = complete). De-risks the curl workaround: if either endpoint goes dark,
+    the other carries the score.
+  - **Weights: HSReplay + Firestone measure the same quantity**, so they blend as one
+    consensus signal (0.5 + 0.5 = 1.0 combined) against the heuristic's 0.5 — two
+    independent votes at 1.0 each would silently demote the heuristic 1/3 → 1/5.
   - `HeuristicArenaDataSource` — offline base value from card metadata. The weights are
-    **fit by ridge regression against real win-rates** (HSReplay + Firestone, win-rate
-    centered per class; see `training/`), not hand-tuned: hand-tuned keyword bonuses
-    validated *worse* than the vanilla stat curve alone. Still a weak signal in absolute
-    terms (out-of-fold Spearman ~0.27, ~55% of the two-source agreement ceiling), so it
-    must not dilute a solid win-rate — it's a backstop for uncovered cards.
+    **fit by ridge regression against real drawn win-rates** (HSReplay + Firestone,
+    centered per class — the same metric the runtime win-rate sources score with), not
+    hand-tuned: hand-tuned keyword bonuses validated *worse* than the vanilla stat curve
+    alone. Still a weak signal in absolute terms (out-of-fold Spearman ~0.27, ~55% of the
+    two-source agreement ceiling), so it must not dilute a solid win-rate — it's a
+    backstop for uncovered cards. Every model number (weights, intercept, display anchor
+    `anchor_median_raw`) lives in the json the trainer writes — nothing is hardcoded; the
+    golden tests pin the end-to-end result and the trainer prints their new values on
+    each re-fit (the manual paste is the deliberate weights-changed tripwire).
     The weights are the SINGLE SOURCE OF TRUTH: fit offline (see `training/`), serialized
     to `arena_weights.json`, embedded into the DLL and loaded at runtime — no coefficients
     are hardcoded, and feature extraction is shared with training so the two can't drift.
@@ -61,7 +89,13 @@ finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  sy
     never re-fits them.) **Re-fit each rotation/patch** by re-running the pipeline; they
     describe the current card pool, not universal keyword values.
 - **`ScoreAggregator`** — weighted mean over sources that have data + the synergy bonus;
-  returns a per-source breakdown. Sources share a centre (median card → 50 in both), but
+  returns a per-source breakdown. Sources return a `SourceScore` (score + games behind
+  the estimate) and the blend scales each source's configured weight by that card's
+  sample confidence — n/(n+k) with the shared shrinkage prior k — so a 5000-game
+  HSReplay estimate is not averaged 50/50 against a 30-game Firestone one; model-based
+  sources (heuristic, `Games=null`) keep their configured weight. The per-source
+  breakdown carries the effective weight and games for the overlay's confidence display.
+  Sources share a centre (median card → 50 in both), but
   their *slopes* differ: HSReplay's logistic is steeper (~+35 pts per robust-SD) than the
   heuristic (~+15), so on disagreement the real win-rate dominates even at equal weight —
   intended, since the heuristic is a weak backstop. If the heuristic improves, revisit its
@@ -74,30 +108,39 @@ finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  sy
   intra-group and deck synergy belongs in `ISynergyEngine` (deferred with it). See
   `ArenaHelperPlugin.ScoreGroup`.
 
-## Synergy engine (design)
+## Synergy engine
 
-During a draft, a card's value depends on what you've already drafted. The engine turns
-the drafted deck into a **+/- bonus** folded into `finalScore`, computed from objective
-card metadata (mechanics, tribes, spell schools, stat curve):
+`MetadataSynergyEngine` turns the drafted deck into a **+/- bonus** folded into
+`finalScore`, computed only from objective card metadata (curve, tribes, weapon slots,
+spell damage): a curve gap filled scores up (scaled by draft progress), a tribal payoff
+rises with drafted members (and members with payoffs; `Race.ALL` amalgams count for every
+tribe), a third-plus weapon and an overloaded curve slot score down.
 
-- **Synergy → positive bonus** (a tribal payoff when you already have that tribe, a
-  spell-damage minion when you have burn, a curve gap filled).
-- **Anti-synergy → negative bonus** (over-loading one part of the curve with no payoff).
+Each component carries a short label; the dominant one (|points| ≥ 0.5) surfaces in the
+overlay as the option's "why" line, and `BlendedScore` flags low confidence (no win-rate
+sample ≥ `BlendedScore.LowConfidenceGames` games) with a dimmed, starred label.
 
+**Surfaced as EXPERIMENTAL** (README + the overlay's "(exp.)" suffix on reason lines).
+**Unvalidated by design**: there is no free public per-deck dataset to fit these rules
+against, and this project's own validation showed hand-tuned card values score worse than
+nothing. The guardrail is the bound — every component is capped and the total clamped to
+±3 points (~1/5 of a blend SD), so synergy breaks ties between comparable cards and can
+never override a solid win-rate. Tests pin directions/caps/clamp, not magic numbers.
 The raw win-rate sources capture *average* value; synergy expresses *this deck's* context.
-See `ISynergyEngine.GetSynergyBonus`.
 
 ## Architecture (file map)
 
 | File | Responsibility |
 |---|---|
 | `ArenaHelperPlugin.cs` | `IPlugin` entry point; wires sources, warms data off-thread with retry, drives all overlay render/visibility from `OnUpdate` (wrapped in try/catch), suppresses/restores HDT's native overlay via a persisted pref file |
-| `DraftWatcher.cs` | Reads offered cards + `Packages` via HearthMirror (`GetArenaDraftChoicesV3`), dedup by `Version`, throttled to 500ms, cardId→dbfId; `Reset()` on (re)enable |
-| `IArenaDataSource.cs` / `ScoreAggregator.cs` | Multi-source blend → `BlendedScore`; `IsLoaded` gates the overlay |
-| `HsReplayArenaDataSource.cs` | Real arena win-rate source; curl fetch, cache-then-download, gated on HearthDb being ready |
+| `DraftWatcher.cs` | Reads offered cards + `Packages` via HearthMirror (`GetArenaDraftChoicesV3`), dedup by `Version`, throttled to 500ms, cardId→dbfId; `Reset()` on (re)enable. Gated on `ArenaSessionState` (draft/redraft only — choices linger in client memory on other screens, e.g. the landing page, and would ghost the overlay; HDT's `ArenaStateWatcher` applies the same gate) and on `Choices.Count == 3` (animations expose partial lists). Post-loss redrafts (Underground AND Normal) are picks too: `IsRedraft`, with run deck + `RedraftDeck` as the synergy context |
+| `IArenaDataSource.cs` / `ScoreAggregator.cs` | Multi-source blend → `BlendedScore` (drafted class threaded through); `LoadedSourceCount` drives partial rendering AND re-renders as late sources come online, `IsLoaded` ends the warm-up loop |
+| `HsReplayArenaDataSource.cs` | Real arena win-rate source; curl fetch, cache-then-download, gated on HearthDb being ready; per-class card scores + class tier |
+| `FirestoneArenaDataSource.cs` | Second real win-rate source: 11 per-class CDN files, plain .NET fetch, per-class fail-soft cache, pooled + per-class scores |
+| `ScoreMath.cs` | Shared statistical policy (shrinkage, median/MAD logistic) + hero-skin map, so the win-rate sources stay mutually calibrated |
 | `HeuristicArenaDataSource.cs` | Offline heuristic base value |
 | `PlaqueTier.cs` | Pure 0-100 score → 1-5 plaque tier map (WPF-free, unit-tested) |
-| `ISynergyEngine.cs` | Synergy contract (`NullSynergyEngine` placeholder) |
+| `ISynergyEngine.cs` / `MetadataSynergyEngine.cs` | Synergy contract + the bounded metadata engine (curve/tribes/weapons/spell damage, total clamped ±3) |
 | `ArenaOverlayWindow.cs` | Borderless click-through overlay hosting HDT's native `ArenaPlaque` (hand-drawn fallback) in a 4:3 `Viewbox` design-space; class/name label under each plaque; poll-driven show/hide |
 | `HdtArenaHelper.Tests/` | xUnit tests: aggregator math, heuristic golden scores (verified against the training tool), HSReplay parsing/tier list via synthetic cache, `PlaqueTier`/`DraftWatcher.ToDbfId` (offline) |
 | `HdtArenaHelper.Training/` | C# console tool that fits the heuristic weights → `arena_weights.json` (embedded into the plugin) + analysis (`REPORT.md`). Reuses the plugin's `BuildFeatures` (shared train/inference features); ridge via Math.NET Numerics. Re-run per patch: `dotnet run --project HdtArenaHelper.Training`. |
@@ -138,7 +181,9 @@ horizontal positions in both phases (`OptionSpreadFraction`); only the vertical 
 (hero portraits vs the lower card row). A class/name label sits under each plaque so the score
 is unambiguously tied to its option. Visibility is driven every tick from `OnUpdate`: shown
 only while a pick is active AND the client exists and is not minimised; nothing shows before
-data has loaded. Anchors were tuned against a live client — re-check after an HDT/HS layout change.
+data has loaded. All anchors live-tuned (2026-07-24): hero pick Y 0.43 / spread 0.29; plain card draft
+and legendary-group picks share the same client layout, so one anchor (Y 0.55, spread
+0.26). Re-check after an HDT/HS layout change.
 
 HDT's arena *pipeline* (`ArenaPickHelperViewModel`/Watchers) is **not** a public injection
 point — its view-model wires itself to HDT's internal `ArenaStateWatcher` and pulls the paid
@@ -201,6 +246,11 @@ Plugins.
 - Style is enforced by `.editorconfig` (tabs in C#, spaces elsewhere, LF, no trailing
   whitespace). A `.githooks/` pre-commit hook checks staged whitespace/indentation; enable
   once with `git config core.hooksPath .githooks`. Contributor guide: `CONTRIBUTING.md`.
+- **Slopwatch** (pinned local dotnet tool; CI gate) blocks NEW disabled tests, warning
+  suppressions, empty catch blocks etc. Run `dotnet tool restore` once, then
+  `dotnet tool run slopwatch analyze -d . --fail-on warning` after changing C#. The few
+  deliberate legacy patterns are baselined in `.slopwatch/baseline.json` — extend the
+  baseline only for a justified, commented pattern, never to silence a real fix.
 
 ## License
 

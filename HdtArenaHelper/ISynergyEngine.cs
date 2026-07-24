@@ -12,15 +12,33 @@ namespace HdtArenaHelper
 	public interface ISynergyEngine
 	{
 		/// <summary>
-		/// Points to add to the card's base score (can be negative), roughly on a
-		/// -10..+15 scale so synergy nudges but does not dominate raw winrate.
+		/// The bonus plus, when meaningful, the dominant labeled reason (shown in the
+		/// overlay so the user knows WHY a score was nudged).
 		/// </summary>
-		double GetSynergyBonus(int offeredDbfId, IReadOnlyCollection<int> draftedDbfIds);
+		SynergyResult GetSynergy(int offeredDbfId, IReadOnlyCollection<int> draftedDbfIds);
 	}
 
-	/// <summary>No-op engine used until the full synergy port is wired in.</summary>
+	/// <summary>
+	/// A synergy verdict: points to add to the card's base score (can be negative;
+	/// bounded by the implementation — MetadataSynergyEngine clamps to ±3 so synergy
+	/// only breaks ties and never overrides a solid win-rate) and a short human-readable
+	/// label of the dominant contribution, or null when nothing meaningful fired.
+	/// </summary>
+	public readonly struct SynergyResult
+	{
+		public double Bonus { get; }
+		public string? TopReason { get; }
+
+		public SynergyResult(double bonus, string? topReason = null)
+		{
+			Bonus = bonus;
+			TopReason = topReason;
+		}
+	}
+
+	/// <summary>No-op engine (kept for tests and as an off-switch).</summary>
 	public sealed class NullSynergyEngine : ISynergyEngine
 	{
-		public double GetSynergyBonus(int offeredDbfId, IReadOnlyCollection<int> draftedDbfIds) => 0;
+		public SynergyResult GetSynergy(int offeredDbfId, IReadOnlyCollection<int> draftedDbfIds) => default;
 	}
 }

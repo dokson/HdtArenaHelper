@@ -1,0 +1,55 @@
+name: hdt-canary
+
+# Early-warning drift detector: users auto-update HDT while our CI builds against a
+# pinned version, so a breaking change in the surfaces we bind at runtime
+# (HearthMirror, ArenaPlaque, HearthDb) would otherwise stay invisible until a user
+# reports "no data". This builds + tests against the LATEST official HDT release; a
+# red run here means "bump the pin and fix the drift before users hit it".
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly (Wednesday) — offset from Friday's retrain so failures are attributable.
+    - cron: '0 6 * * 3'
+
+jobs:
+  canary:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The pin build.yml/train.yml use, printed for comparison in the log.
+      PINNED_HDT_VERSION: '1.53.14'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve LATEST official HDT release
+        id: hdt
+        shell: pwsh
+        run: |
+          $tag = gh release view --repo HearthSim/HDT-Releases --json tagName -q .tagName
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tag)) {
+            throw 'Could not resolve the latest HDT release tag.'
+          }
+          $latest = $tag.TrimStart('v')
+          Write-Host "latest HDT: $latest (CI pin: $env:PINNED_HDT_VERSION)"
+          if ($latest -eq $env:PINNED_HDT_VERSION) {
+            Write-Host 'Latest matches the pin - this run duplicates build.yml, but stays as a heartbeat.'
+          }
+          $path = .\scripts\resolve-hdt.ps1 -Version $latest
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$latest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build against latest HDT
+        shell: pwsh
+        run: dotnet build HdtArenaHelper.sln -c Release -warnaserror "/p:CI=true" "/p:HSDTPath=${{ steps.hdt.outputs.path }}"
+
+      - name: Test against latest HDT
+        shell: pwsh
+        run: dotnet test HdtArenaHelper.Tests/HdtArenaHelper.Tests.csproj -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" --no-build
+
+      - name: Drift verdict
+        shell: pwsh
+        run: Write-Host "CANARY PASS - plugin builds and tests green against HDT ${{ steps.hdt.outputs.version }}."

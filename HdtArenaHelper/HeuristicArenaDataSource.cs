@@ -24,13 +24,14 @@ namespace HdtArenaHelper
 	/// is shared with training so the feature vectors can't drift. To re-fit for a new
 	/// rotation/patch, re-run the trainer to regenerate that file and rebuild.
 	///
-	/// The weights were fit by ridge regression against real arena win-rates
-	/// (HSReplay + Firestone public data, win-rate centered on each class's average so
-	/// the score measures card value, not class strength). Out-of-fold Spearman vs real
-	/// win-rates is ~0.27 — a weak signal in absolute terms, so this only ranks cards
-	/// the real win-rate data has not covered; it must not override a solid win-rate.
-	/// The raw formula predicts win-rate points relative to an average card of the same
-	/// class; weights describe the CURRENT card pool, not universal keyword values.
+	/// The weights were fit by ridge regression against real arena DRAWN win-rates
+	/// (HSReplay + Firestone public data; the metric the runtime sources score with,
+	/// centered on each class's average so the score measures card value, not class
+	/// strength). Out-of-fold Spearman vs real win-rates is ~0.27 — a weak signal in
+	/// absolute terms, so this only ranks cards the real win-rate data has not covered;
+	/// it must not override a solid win-rate. The raw formula predicts win-rate points
+	/// relative to an average card of the same class; weights describe the CURRENT card
+	/// pool, not universal keyword values.
 	/// </summary>
 	public class HeuristicArenaDataSource : IArenaDataSource
 	{
@@ -38,28 +39,54 @@ namespace HdtArenaHelper
 		private const string WeightsResource = "HdtArenaHelper.arena_weights.json";
 		private static readonly ArenaWeights Model = ArenaWeights.LoadEmbedded(WeightsResource);
 
-		private readonly Dictionary<int, Card> _byDbfId = new Dictionary<int, Card>();
+		// Published once HearthDb is ready (empty right at HDT startup); volatile so the
+		// poll-thread reader sees a fully-built map, never a half-filled one.
+		private volatile IReadOnlyDictionary<int, Card>? _byDbfId;
 
 		public HeuristicArenaDataSource(double weight = 1.0)
 		{
 			Weight = weight;
-			foreach(var kv in Cards.All)
-			{
-				var dbf = kv.Value.DbfId;
-				if(dbf != 0 && !_byDbfId.ContainsKey(dbf))
-					_byDbfId[dbf] = kv.Value;
-			}
 		}
 
 		public string Name => "Heuristic";
 		public double Weight { get; }
-		public bool IsLoaded => true; // pure computation over bundled card data
+		// Not "loaded" until the card map is built: HearthDb may be empty at OnLoad, and a
+		// map built then would stay empty all session — so the warm-up loop keeps retrying
+		// (otherwise the backstop is silently dead and IsLoaded would lie about it).
+		public bool IsLoaded => _byDbfId != null;
 
-		public Task EnsureLoadedAsync() => Task.CompletedTask;
-
-		public double? GetNormalizedScore(int dbfId)
+		public Task EnsureLoadedAsync()
 		{
-			if(!_byDbfId.TryGetValue(dbfId, out var card))
+			EnsureMap();
+			return Task.CompletedTask;
+		}
+
+		// Build the dbfId->Card map once HearthDb is populated (it's empty right at HDT
+		// startup, so a map built eagerly in the ctor would stay empty all session).
+		// Idempotent and published atomically; safe to call from any thread / on demand.
+		private void EnsureMap()
+		{
+			if(_byDbfId != null || Cards.All.Count == 0)
+				return;
+
+			var map = new Dictionary<int, Card>();
+			foreach(var kv in Cards.All)
+			{
+				var dbf = kv.Value.DbfId;
+				if(dbf != 0 && !map.ContainsKey(dbf))
+					map[dbf] = kv.Value;
+			}
+			_byDbfId = map;
+		}
+
+		// draftClass is ignored: the model's weights are global by design (per-class fits
+		// validated worse — too little data per class; see the training REPORT).
+		// Games is null: a model-based score has no per-card sample behind it.
+		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
+		{
+			EnsureMap(); // build on first use (tests score without a warm-up; HDT defers at startup)
+			var byDbfId = _byDbfId;
+			if(byDbfId == null || !byDbfId.TryGetValue(dbfId, out var card))
 				return null;
 
 			// Class-pick hero skins are rated by the win-rate source's class tier.
@@ -70,10 +97,10 @@ namespace HdtArenaHelper
 			try { raw = Model.Score(BuildFeatures(card)); }
 			catch { return null; }
 
-			// Display mapping onto the 0-100 blend scale: the median draftable card
-			// (-0.28 raw) sits at 50, each win-rate point is worth 15. The model weights
-			// come from the json; this anchor/slope is the source's presentation choice.
-			return Clamp(50 + 15 * (raw + 0.28));
+			// Display mapping onto the 0-100 blend scale: the median draftable card maps
+			// to 50 (the trainer measures the pool median and ships it in the json as
+			// anchor_median_raw), each win-rate point is worth 15.
+			return new SourceScore(Clamp(50 + 15 * (raw - Model.AnchorMedianRaw)));
 		}
 
 		/// <summary>
@@ -200,7 +227,8 @@ namespace HdtArenaHelper
 
 		private static readonly Regex Markup = new Regex(@"<[^>]+>|\[x\]", RegexOptions.Compiled);
 
-		private static string CleanText(Card card)
+		// Shared with MetadataSynergyEngine so both read the same normalized card text.
+		internal static string CleanText(Card card)
 		{
 			var text = card.GetLocText(Locale.enUS) ?? "";
 			return Markup.Replace(text, " ").ToLowerInvariant();
@@ -223,9 +251,10 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
-	/// The ridge model (intercept + per-feature coefficients) loaded from the embedded
-	/// <c>arena_weights.json</c>. Unknown features read as 0, so a weight dropped by the
-	/// training pipeline simply contributes nothing.
+	/// The ridge model (intercept + per-feature coefficients + display anchor) loaded
+	/// from the embedded <c>arena_weights.json</c> — every model number lives in the
+	/// json the trainer writes; nothing is hardcoded here. Unknown features read as 0,
+	/// so a weight dropped by the training pipeline simply contributes nothing.
 	/// </summary>
 	internal sealed class ArenaWeights
 	{
@@ -233,12 +262,20 @@ namespace HdtArenaHelper
 
 		public double Intercept { get; }
 
+		/// <summary>
+		/// Median raw score of the draftable pool, measured by the trainer at fit time:
+		/// the display mapping subtracts it so the median card lands at 50.
+		/// </summary>
+		public double AnchorMedianRaw { get; }
+
 		public double this[string feature]
 			=> _weights.TryGetValue(feature, out var v) ? v : 0.0;
 
-		private ArenaWeights(double intercept, IReadOnlyDictionary<string, double> weights)
+		private ArenaWeights(double intercept, double anchorMedianRaw,
+			IReadOnlyDictionary<string, double> weights)
 		{
 			Intercept = intercept;
+			AnchorMedianRaw = anchorMedianRaw;
 			_weights = weights;
 		}
 
@@ -264,16 +301,17 @@ namespace HdtArenaHelper
 					{
 						var root = JObject.Parse(reader.ReadToEnd());
 						var intercept = (double?)root["intercept"] ?? 0.0;
+						var anchor = (double?)root["anchor_median_raw"] ?? 0.0;
 						var weights = root["weights"]?.ToObject<Dictionary<string, double>>()
 							?? new Dictionary<string, double>();
-						return new ArenaWeights(intercept, weights);
+						return new ArenaWeights(intercept, anchor, weights);
 					}
 				}
 			}
 			catch(Exception ex)
 			{
 				Hearthstone_Deck_Tracker.Utility.Logging.Log.Error("[ArenaHelper] weights load failed: " + ex);
-				return new ArenaWeights(0.0, new Dictionary<string, double>());
+				return new ArenaWeights(0.0, 0.0, new Dictionary<string, double>());
 			}
 		}
 	}

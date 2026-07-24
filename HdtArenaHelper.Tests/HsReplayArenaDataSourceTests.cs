@@ -50,9 +50,9 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(SymmetricPayload);
 
-			var low = source.GetNormalizedScore(Dbf("CS2_120"))!.Value;   // 40
-			var mid = source.GetNormalizedScore(Dbf("CS2_182"))!.Value;   // 50 (median)
-			var high = source.GetNormalizedScore(Dbf("CS2_200"))!.Value;  // 60
+			var low = source.GetNormalizedScore(Dbf("CS2_120"))!.Value.Score;   // 40
+			var mid = source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score;   // 50 (median)
+			var high = source.GetNormalizedScore(Dbf("CS2_200"))!.Value.Score;  // 60
 
 			Assert.True(source.IsLoaded);
 			Assert.Equal(50.0, mid, 0);                 // median card -> 50, not min-max's 67
@@ -75,8 +75,8 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			var highSample = source.GetNormalizedScore(Dbf("CS2_189"))!.Value; // 70 @ 4000
-			var lowSample = source.GetNormalizedScore(Dbf("CS2_168"))!.Value;  // 70 @ 15
+			var highSample = source.GetNormalizedScore(Dbf("CS2_189"))!.Value.Score; // 70 @ 4000
+			var lowSample = source.GetNormalizedScore(Dbf("CS2_168"))!.Value.Score;  // 70 @ 15
 
 			Assert.True(lowSample < highSample);
 		}
@@ -93,7 +93,7 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.True(source.GetNormalizedScore(Dbf("CS2_182")) > source.GetNormalizedScore(Dbf("CS2_200")));
+			Assert.True(source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score > source.GetNormalizedScore(Dbf("CS2_200"))!.Value.Score);
 		}
 
 		[Fact]
@@ -105,7 +105,7 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.Equal(55.0, source.GetRaw(Dbf("CS2_182"))!.IncludedWinrate);
+			Assert.Equal(55.0, source.GetRaw(Dbf("CS2_182"))!.DrawnWinrate);
 		}
 
 		[Fact]
@@ -133,7 +133,7 @@ namespace HdtArenaHelper.Tests
 			var source = await LoadAsync(payload);
 
 			// 52.0 (9000 games) wins over 55.0 (5000 games).
-			Assert.Equal(52.0, source.GetRaw(Dbf("CS2_106"))!.IncludedWinrate);
+			Assert.Equal(52.0, source.GetRaw(Dbf("CS2_106"))!.DrawnWinrate);
 		}
 
 		// Three classes with different average card win-rates -> a ranked tier list.
@@ -173,8 +173,8 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(ClassPayload);
 
-			var garrosh = source.GetNormalizedScore(Dbf("HERO_01"))!.Value; // Warrior
-			var jaina = source.GetNormalizedScore(Dbf("HERO_08"))!.Value;   // Mage
+			var garrosh = source.GetNormalizedScore(Dbf("HERO_01"))!.Value.Score; // Warrior
+			var jaina = source.GetNormalizedScore(Dbf("HERO_08"))!.Value.Score;   // Mage
 
 			Assert.True(garrosh > jaina);
 		}
@@ -195,6 +195,55 @@ namespace HdtArenaHelper.Tests
 			Assert.False(source.IsLoaded);
 			Assert.Null(source.GetNormalizedScore(Dbf("CS2_106")));
 			Assert.Null(source.GetNormalizedScore(Dbf("HERO_01")));
+		}
+
+		// A card that is mediocre overall but excels in mage (and vice versa), so the
+		// class-agnostic and per-class orderings disagree.
+		private const string PerClassPayload = @"{
+			""data"": {
+				""ALL"": [
+					{ ""card_id"": ""CS2_120"", ""drawn_win_rate"": 55.0, ""num_games"": 3000 },
+					{ ""card_id"": ""CS2_182"", ""drawn_win_rate"": 50.0, ""num_games"": 3000 },
+					{ ""card_id"": ""CS2_200"", ""drawn_win_rate"": 45.0, ""num_games"": 3000 },
+					{ ""card_id"": ""CS2_189"", ""drawn_win_rate"": 48.0, ""num_games"": 3000 }
+				],
+				""MAGE"": [
+					{ ""card_id"": ""CS2_182"", ""drawn_win_rate"": 58.0, ""num_games"": 1500 },
+					{ ""card_id"": ""CS2_120"", ""drawn_win_rate"": 40.0, ""num_games"": 1500 }
+				]
+			} }";
+
+		[Fact]
+		public async Task Known_draft_class_scores_from_that_class_bucket()
+		{
+			var source = await LoadAsync(PerClassPayload);
+
+			// Class-agnostic ordering (ALL): CS2_120 (55) beats CS2_182 (50)...
+			Assert.True(source.GetNormalizedScore(Dbf("CS2_120"))!.Value.Score > source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score);
+			// ...but drafting mage flips it: in the MAGE bucket CS2_182 (58) beats CS2_120 (40).
+			Assert.True(source.GetNormalizedScore(Dbf("CS2_182"), CardClass.MAGE)!.Value.Score
+				> source.GetNormalizedScore(Dbf("CS2_120"), CardClass.MAGE)!.Value.Score);
+		}
+
+		[Fact]
+		public async Task Card_missing_from_the_class_bucket_falls_back_to_all()
+		{
+			var source = await LoadAsync(PerClassPayload);
+
+			// CS2_189 has no MAGE entry: the mage-context score IS the ALL score.
+			Assert.Equal(
+				source.GetNormalizedScore(Dbf("CS2_189")),
+				source.GetNormalizedScore(Dbf("CS2_189"), CardClass.MAGE));
+		}
+
+		[Fact]
+		public async Task Class_without_a_bucket_falls_back_to_all()
+		{
+			var source = await LoadAsync(PerClassPayload);
+
+			Assert.Equal(
+				source.GetNormalizedScore(Dbf("CS2_120")),
+				source.GetNormalizedScore(Dbf("CS2_120"), CardClass.PRIEST));
 		}
 	}
 }

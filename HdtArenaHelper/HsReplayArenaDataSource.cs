@@ -26,7 +26,7 @@ namespace HdtArenaHelper
 	///      actually drawn), a less deck-strength-confounded measure than the deck's
 	///      included <c>win_rate</c>. Falls back to <c>win_rate</c> if absent.
 	///   2. Shrinkage: pull each card's rate toward the global mean by sample size —
-	///      empirical Bayes with a <see cref="ShrinkGames"/>-game prior — so a 12-game
+	///      empirical Bayes with a <see cref="ScoreMath.ShrinkGames"/>-game prior — so a 12-game
 	///      card no longer asserts an extreme rate (and can't anchor the scale).
 	///   3. Normalization: a logistic curve anchored at the robust CENTRE (median of the
 	///      shrunk rates) with a robust SPREAD (MAD). The median card maps to 50 so the
@@ -34,9 +34,14 @@ namespace HdtArenaHelper
 	///      immune to outliers and stable across daily refreshes. (This replaces a
 	///      min-max mapping that pinned 0 to a single noise card.)
 	///
-	/// The per-class buckets are scored the same way into a class tier list; at the
-	/// hero-pick step the offered HERO_* skins are rated by their class's tier, so the
-	/// overlay doubles as a class picker.
+	/// The per-class buckets serve two purposes:
+	///   - a class tier list (unweighted mean of the class's shrunk card rates); at the
+	///     hero-pick step the offered HERO_* skins are rated by their class's tier, so
+	///     the overlay doubles as a class picker;
+	///   - per-class card scores: once the drafted class is known, a card is rated by its
+	///     rate in THAT class's bucket (shrunk toward the card's ALL rate, so thin class
+	///     samples glide to the class-agnostic estimate), normalized within the bucket.
+	///     Cards missing from the bucket fall back to the ALL score.
 	///
 	/// A realistic browser User-Agent is required or Cloudflare serves a challenge.
 	/// Cached with a 1-day TTL.
@@ -46,13 +51,6 @@ namespace HdtArenaHelper
 		private const string Endpoint =
 			"https://hsreplay.net/api/v1/arena/card_stats/free/?format=json";
 
-		// Soft floor: below this a rate is pure noise even after shrinkage.
-		private const int MinGames = 10;
-		// Empirical-Bayes prior strength, in pseudo-games, toward the global mean.
-		private const int ShrinkGames = 60;
-		// Logistic slope that makes 100/(1+e^-1.702z) approximate the normal CDF, so a
-		// card one robust-SD above the median scores ~85.
-		private const double LogisticSlope = 1.702;
 		private static readonly TimeSpan CacheMaxAge = TimeSpan.FromHours(24);
 
 		// A full browser User-Agent alone is NOT enough: Cloudflare fingerprints the
@@ -74,19 +72,22 @@ namespace HdtArenaHelper
 		private sealed class Data
 		{
 			public Dictionary<int, ArenaCardScore> Raw { get; }
-			public Dictionary<int, double> CardScore { get; }        // dbfId -> 0..100
-			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100
+			public Dictionary<int, SourceScore> CardScore { get; }   // dbfId -> score+games (ALL bucket)
+			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100 (tier list)
+			public Dictionary<CardClass, Dictionary<int, SourceScore>> ClassCardScore { get; }
 			public Dictionary<int, CardClass> HeroClass { get; }     // hero-skin dbfId -> class
 
 			public Data(
 				Dictionary<int, ArenaCardScore> raw,
-				Dictionary<int, double> cardScore,
+				Dictionary<int, SourceScore> cardScore,
 				Dictionary<CardClass, double> classScore,
+				Dictionary<CardClass, Dictionary<int, SourceScore>> classCardScore,
 				Dictionary<int, CardClass> heroClass)
 			{
 				Raw = raw;
 				CardScore = cardScore;
 				ClassScore = classScore;
+				ClassCardScore = classCardScore;
 				HeroClass = heroClass;
 			}
 		}
@@ -114,17 +115,26 @@ namespace HdtArenaHelper
 		/// <summary>Per-class 0-100 tier scores (the hero-pick tier list), if loaded.</summary>
 		public IReadOnlyDictionary<CardClass, double>? ClassScores => _data?.ClassScore;
 
-		public double? GetNormalizedScore(int dbfId)
+		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
 		{
 			var data = _data; // read the published bundle once
 			if(data == null)
 				return null;
 
-			// Hero pick: rank the offered classes instead of a single card.
+			// Hero pick: rank the offered classes instead of a single card. A tier is
+			// backed by a whole class bucket, not one card's sample: no games discount.
 			if(data.HeroClass.TryGetValue(dbfId, out var heroClass))
-				return data.ClassScore.TryGetValue(heroClass, out var cs) ? cs : (double?)null;
+				return data.ClassScore.TryGetValue(heroClass, out var cs)
+					? new SourceScore(cs)
+					: (SourceScore?)null;
 
-			return data.CardScore.TryGetValue(dbfId, out var score) ? score : (double?)null;
+			// Known drafted class: prefer the card's rate in that class's own bucket.
+			if(draftClass != CardClass.INVALID
+				&& data.ClassCardScore.TryGetValue(draftClass, out var perClass)
+				&& perClass.TryGetValue(dbfId, out var classScore))
+				return classScore;
+
+			return data.CardScore.TryGetValue(dbfId, out var score) ? score : (SourceScore?)null;
 		}
 
 		public async Task EnsureLoadedAsync()
@@ -143,7 +153,7 @@ namespace HdtArenaHelper
 
 			// Prefer the persisted cache (so a restart doesn't re-download); fall back to a
 			// fresh download only if the cache is missing, stale, or unparseable.
-			var json = ReadFreshCache();
+			var json = ReadCache();
 			var raw = json != null ? Parse(json) : new Dictionary<int, ArenaCardScore>();
 			var source = "cache";
 
@@ -151,123 +161,100 @@ namespace HdtArenaHelper
 			{
 				if(json != null)
 					Log("cached arena data unusable; downloading fresh");
-				json = await DownloadAsync().ConfigureAwait(false);
-				source = "network";
-				if(json == null)
+				var downloaded = await DownloadAsync().ConfigureAwait(false);
+				var downloadedRaw = downloaded != null ? Parse(downloaded) : new Dictionary<int, ArenaCardScore>();
+				if(downloadedRaw.Count > 0)
 				{
-					Log("arena data unavailable (cache miss + download blocked)");
-					return;
+					json = downloaded;
+					raw = downloadedRaw;
+					source = "network";
+					TryWriteCache(downloaded!);
 				}
-				raw = Parse(json);
-				if(raw.Count == 0)
+				else
 				{
-					Log("downloaded arena data parsed to 0 cards; skipping");
-					return;
+					// Download unavailable/empty: fall back to a stale (>TTL) cache rather than
+					// showing nothing — day-old win-rates beat none when the network is down.
+					var stale = ReadCache(requireFresh: false);
+					raw = stale != null ? Parse(stale) : raw;
+					if(raw.Count == 0)
+					{
+						Log("arena data unavailable (no cache + download blocked)");
+						return;
+					}
+					json = stale;
+					source = "stale cache";
+					Log("using stale cache (download unavailable)");
 				}
-				TryWriteCache(json);
 			}
 
 			var globalMean = raw.Values
-				.Where(s => s.IncludedWinrate.HasValue)
-				.Select(s => s.IncludedWinrate!.Value)
+				.Where(s => s.DrawnWinrate.HasValue)
+				.Select(s => s.DrawnWinrate!.Value)
 				.DefaultIfEmpty(50.0)
 				.Average();
 
-			var classScores = ScoreClasses(json!, globalMean);
-			var heroClass = BuildHeroClassMap();
+			// dbf -> shrunk ALL rate: the class-agnostic score and the shrink fallback
+			// for the thinner per-class rates below.
+			var allShrunk = ShrinkAll(raw, globalMean);
+			var classShrunk = ParseClassShrunk(json!, raw, allShrunk, globalMean);
+
+			// ONE scale for every card score — anchored on the ALL pool. A pick can mix
+			// class-bucket scores with ALL fallbacks, so normalizing each class bucket to
+			// its own median would compare apples to oranges within the same pick.
+			var center = ScoreMath.Median(allShrunk.Values);
+			var sigma = ScoreMath.RobustSigma(allShrunk.Values, center);
+
+			var classCardScore = new Dictionary<CardClass, Dictionary<int, SourceScore>>(classShrunk.Count);
+			var classTier = new Dictionary<CardClass, double>(classShrunk.Count);
+			foreach(var kv in classShrunk)
+			{
+				var rates = kv.Value.ToDictionary(e => e.Key, e => e.Value.Rate);
+				classCardScore[kv.Key] = ScoreMath.ToScores(rates, center, sigma).ToDictionary(
+					e => e.Key, e => new SourceScore(e.Value, kv.Value[e.Key].Games));
+				// Unweighted mean rather than games-weighted: games-weighting is
+				// popularity-weighting (popularity correlates ~0.5 with win-rate), which
+				// biases each class's estimate upward by its most-played cards.
+				classTier[kv.Key] = rates.Values.Average();
+			}
+			var classScores = classTier.Count == 0
+				? new Dictionary<CardClass, double>()
+				: ScoreMath.ToScores(classTier);
+			var heroClass = HeroSkins.BuildClassMap();
+
+			// The games behind each ALL score travel with it, so the blend can weight
+			// this card's precision against the other sources'.
+			var cardScore = ScoreMath.ToScores(allShrunk, center, sigma).ToDictionary(
+				e => e.Key, e => new SourceScore(e.Value, raw[e.Key].Games));
 
 			// Publish all maps at once through the single volatile reference.
-			_data = new Data(raw, ScoreCards(raw, globalMean), classScores, heroClass);
+			_data = new Data(raw, cardScore, classScores, classCardScore, heroClass);
 			Log($"loaded {raw.Count} cards, {classScores.Count} class tiers, {heroClass.Count} hero skins (source: {source})");
-		}
-
-		/// <summary>Hero-skin dbfId -> class (HERO_01, HERO_01a, ...); built once HearthDb is ready.</summary>
-		private static Dictionary<int, CardClass> BuildHeroClassMap()
-		{
-			var map = new Dictionary<int, CardClass>();
-			foreach(var kv in HearthDb.Cards.All)
-			{
-				if(kv.Key.StartsWith("HERO_", StringComparison.Ordinal) && kv.Value.DbfId != 0)
-					map[kv.Value.DbfId] = kv.Value.Class;
-			}
-			return map;
 		}
 
 		// ---- scoring -------------------------------------------------------------
 
-		/// <summary>
-		/// Shrinks a card's rate toward <paramref name="globalMean"/> by sample size
-		/// (empirical Bayes): (n·wr + k·μ) / (n + k).
-		/// </summary>
-		private static double Shrink(double winrate, int games, double globalMean)
-			=> (games * winrate + ShrinkGames * globalMean) / (games + ShrinkGames);
-
-		private static Dictionary<int, double> ScoreCards(
+		/// <summary>dbf -> ALL-bucket rate shrunk toward the global mean.</summary>
+		private static Dictionary<int, double> ShrinkAll(
 			IReadOnlyDictionary<int, ArenaCardScore> raw, double globalMean)
 		{
 			var shrunk = new Dictionary<int, double>(raw.Count);
 			foreach(var kv in raw)
 			{
 				var s = kv.Value;
-				shrunk[kv.Key] = Shrink(s.IncludedWinrate ?? globalMean, s.Games ?? 0, globalMean);
+				shrunk[kv.Key] = ScoreMath.Shrink(s.DrawnWinrate ?? globalMean, s.Games ?? 0, globalMean);
 			}
-			return ToScores(shrunk);
-		}
-
-		private Dictionary<CardClass, double> ScoreClasses(string json, double globalMean)
-		{
-			var classWinrate = ParseClassWinrates(json, globalMean);
-			return classWinrate.Count == 0
-				? new Dictionary<CardClass, double>()
-				: ToScores(classWinrate);
-		}
-
-		/// <summary>
-		/// Maps values to 0-100 via a logistic anchored at the robust centre (median)
-		/// with a robust spread (MAD), so the median input is 50 and outliers saturate
-		/// without stretching the scale.
-		/// </summary>
-		private static Dictionary<TKey, double> ToScores<TKey>(IReadOnlyDictionary<TKey, double> values)
-		{
-			var center = Median(values.Values);
-			var sigma = RobustSigma(values.Values, center);
-			var result = new Dictionary<TKey, double>(values.Count);
-			foreach(var kv in values)
-				result[kv.Key] = Logistic((kv.Value - center) / sigma);
-			return result;
-		}
-
-		private static double Logistic(double z)
-			=> 100.0 / (1.0 + Math.Exp(-LogisticSlope * z));
-
-		private static double Median(IEnumerable<double> values)
-		{
-			var sorted = values.OrderBy(v => v).ToList();
-			if(sorted.Count == 0)
-				return 0.0;
-			var mid = sorted.Count / 2;
-			return sorted.Count % 2 == 1
-				? sorted[mid]
-				: (sorted[mid - 1] + sorted[mid]) / 2.0;
-		}
-
-		/// <summary>Median absolute deviation, scaled to a normal-consistent SD.</summary>
-		private static double RobustSigma(IEnumerable<double> values, double center)
-		{
-			var mad = Median(values.Select(v => Math.Abs(v - center)));
-			var sigma = 1.4826 * mad;
-			return sigma > 1e-9 ? sigma : 1.0; // degenerate spread -> everything near 50
+			return shrunk;
 		}
 
 		// ---- parsing / io --------------------------------------------------------
 
-		private string? ReadFreshCache()
+		private string? ReadCache(bool requireFresh = true)
 		{
 			try
 			{
 				if(!File.Exists(_cacheFile))
 					return null;
-				if(DateTime.UtcNow - File.GetLastWriteTimeUtc(_cacheFile) > CacheMaxAge)
+				if(requireFresh && DateTime.UtcNow - File.GetLastWriteTimeUtc(_cacheFile) > CacheMaxAge)
 					return null;
 				return File.ReadAllText(_cacheFile);
 			}
@@ -280,7 +267,18 @@ namespace HdtArenaHelper
 
 		private void TryWriteCache(string json)
 		{
-			try { File.WriteAllText(_cacheFile, json); }
+			try
+			{
+				// Atomic swap so a concurrent reader (a superseded warm-up loop still
+				// finishing against an old source instance) sees the old or the new file,
+				// never a torn write.
+				var tmp = _cacheFile + ".tmp";
+				File.WriteAllText(tmp, json);
+				if(File.Exists(_cacheFile))
+					File.Replace(tmp, _cacheFile, null);
+				else
+					File.Move(tmp, _cacheFile);
+			}
 			catch(Exception ex) { Log($"cache write failed: {ex.Message}"); }
 		}
 
@@ -392,7 +390,7 @@ namespace HdtArenaHelper
 						continue;
 
 					var games = (int?)card["num_games"] ?? 0;
-					if(games < MinGames)
+					if(games < ScoreMath.MinGames)
 						continue;
 
 					// One card id can map to several dbf ids only via variants; keep the
@@ -412,14 +410,20 @@ namespace HdtArenaHelper
 		}
 
 		/// <summary>
-		/// Per class, the UNWEIGHTED mean of its cards' shrunk drawn win-rates (cards
-		/// below <see cref="MinGames"/> excluded). Unweighted rather than games-weighted:
-		/// games-weighting is popularity-weighting (popularity correlates ~0.5 with
-		/// win-rate), which biases each class's estimate upward by its most-played cards.
+		/// Per class, each card's rate in that class's bucket shrunk toward a
+		/// leave-that-class-out prior (the card's ALL rate minus this bucket's games —
+		/// shrinking toward a prior that CONTAINS the observation would double-count it;
+		/// fallback: the shrunk ALL rate, then the global mean). Thin class samples glide
+		/// to the class-agnostic estimate instead of asserting a noisy class-specific one.
+		/// Backtested cross-source (target: the other source's class rate): the class
+		/// estimator beats plain ALL — pooled Spearman 0.73 vs 0.53, MAE 3.4 vs 3.9.
+		/// Cards below <see cref="ScoreMath.MinGames"/> excluded; duplicates keep most games.
 		/// </summary>
-		private static Dictionary<CardClass, double> ParseClassWinrates(string json, double globalMean)
+		private static Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>> ParseClassShrunk(
+			string json, IReadOnlyDictionary<int, ArenaCardScore> raw,
+			IReadOnlyDictionary<int, double> allShrunk, double globalMean)
 		{
-			var result = new Dictionary<CardClass, double>();
+			var result = new Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>>();
 			try
 			{
 				var data = JObject.Parse(json)["data"] as JObject;
@@ -430,27 +434,60 @@ namespace HdtArenaHelper
 				{
 					if(prop.Name == "ALL" || !(prop.Value is JArray bucket))
 						continue;
-					if(!Enum.TryParse<CardClass>(prop.Name, out var cls))
+					if(!Enum.TryParse<CardClass>(prop.Name, ignoreCase: true, out var cls))
 						continue;
 
-					var shrunk = new List<double>();
+					var shrunk = new Dictionary<int, (double Rate, int Games)>();
 					foreach(var card in bucket)
 					{
-						var winrate = ReadWinrate(card);
-						var games = (int?)card["num_games"] ?? 0;
-						if(winrate == null || games < MinGames)
+						var cardId = (string?)card["card_id"];
+						if(string.IsNullOrEmpty(cardId))
 							continue;
-						shrunk.Add(Shrink(winrate.Value, games, globalMean));
+						if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard) || dbCard.DbfId == 0)
+							continue;
+
+						var winrate = ReadWinrate(card);
+						var n = (int?)card["num_games"] ?? 0;
+						if(winrate == null || n < ScoreMath.MinGames)
+							continue;
+						if(shrunk.TryGetValue(dbCard.DbfId, out var seen) && seen.Games >= n)
+							continue;
+
+						shrunk[dbCard.DbfId] = (ScoreMath.Shrink(winrate.Value, n,
+							LeaveClassOutTarget(dbCard.DbfId, winrate.Value, n, raw, allShrunk, globalMean)), n);
 					}
 					if(shrunk.Count > 0)
-						result[cls] = shrunk.Average();
+						result[cls] = shrunk;
 				}
 			}
 			catch(Exception ex)
 			{
-				Log($"class winrate parse failed: {ex.Message}");
+				Log($"class bucket parse failed: {ex.Message}");
 			}
 			return result;
+		}
+
+		/// <summary>
+		/// The card's ALL rate with this class's games subtracted out. Guarded: if the
+		/// remainder is too thin (class cards ARE most of their ALL sample) or the buckets
+		/// don't reconcile, fall back to the shrunk ALL rate.
+		/// </summary>
+		private static double LeaveClassOutTarget(int dbfId, double classRate, int classGames,
+			IReadOnlyDictionary<int, ArenaCardScore> raw, IReadOnlyDictionary<int, double> allShrunk,
+			double globalMean)
+		{
+			if(raw.TryGetValue(dbfId, out var all) && all.DrawnWinrate.HasValue)
+			{
+				var allGames = all.Games ?? 0;
+				var looGames = allGames - classGames;
+				if(looGames >= ScoreMath.MinGames)
+				{
+					var loo = (allGames * all.DrawnWinrate.Value - classGames * classRate) / looGames;
+					if(loo >= 0 && loo <= 100)
+						return loo;
+				}
+			}
+			return allShrunk.TryGetValue(dbfId, out var allRate) ? allRate : globalMean;
 		}
 
 		private static void Log(string msg)

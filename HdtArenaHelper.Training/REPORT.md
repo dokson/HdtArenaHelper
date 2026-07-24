@@ -1,5 +1,15 @@
 # Arena card-value heuristic — final results (2026-07, arena-underground patch)
 
+> **2026-07-24 re-fit note.** The committed `arena_weights.json` was re-fit with the
+> target metric switched from deck-inclusion win-rate to **drawn win-rate** (the same,
+> less deck-confounded metric the runtime win-rate sources score with — see the
+> statistical review of `HsReplayArenaDataSource`). The trainer now also measures the
+> draftable pool's median raw score and ships it as `anchor_median_raw` (display anchor),
+> and prints the golden-test scores to paste on adoption. The analysis below documents
+> the ORIGINAL model-selection study, which used the deck-inclusion target: the
+> methodology conclusions (class-centered target, ridge ≥ GBM, noise ceiling) carry
+> over; the exact rho values refer to that study.
+
 ## Data
 - HSReplay `arena/card_stats/free` (ALL + 11 class buckets), dedup by `card_id` keeping max `num_games`.
 - HearthstoneJSON `latest/enUS/cards.json` (join on `id`).

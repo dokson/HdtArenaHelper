@@ -6,7 +6,16 @@ namespace HdtArenaHelper.Tests
 {
 	public class HeuristicArenaDataSourceTests
 	{
-		private static readonly HeuristicArenaDataSource Source = new HeuristicArenaDataSource();
+		// The card map builds in EnsureLoadedAsync (HearthDb may be empty at plugin
+		// OnLoad); here HearthDb is ready, so one synchronous call loads it.
+		private static readonly HeuristicArenaDataSource Source = CreateLoaded();
+
+		private static HeuristicArenaDataSource CreateLoaded()
+		{
+			var source = new HeuristicArenaDataSource();
+			source.EnsureLoadedAsync().GetAwaiter().GetResult();
+			return source;
+		}
 
 		private static int Dbf(string cardId) => Cards.All[cardId].DbfId;
 
@@ -17,22 +26,22 @@ namespace HdtArenaHelper.Tests
 		/// re-running the trainer and reading the scores.
 		/// </summary>
 		[Theory]
-		[InlineData("LOOT_413", 33.35)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 41.30)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 32.39)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 44.15)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 46.37)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 34.70)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 43.85)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 64.85)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 28.82)]  // Dark Iron Dwarf - conditional buff
-		[InlineData("NEW1_030", 0.0)]   // Deathwing - clamped to the floor
+		[InlineData("LOOT_413", 36.50)] // Plated Beetle - vanilla-ish minion
+		[InlineData("CS2_189", 39.20)]  // Elven Archer - battlecry damage
+		[InlineData("EX1_093", 34.55)]  // Defender of Argus - buff + taunt text
+		[InlineData("CS2_106", 48.50)]  // Fiery War Axe - weapon path
+		[InlineData("CS2_029", 48.65)]  // Fireball - spell with damage magnitude
+		[InlineData("EX1_050", 34.25)]  // Coldlight Oracle - draw text
+		[InlineData("GIL_828", 50.45)]  // Dire Frenzy - buff spell
+		[InlineData("CS2_235", 55.85)]  // Northshire Cleric - persistent draw
+		[InlineData("EX1_046", 24.20)]  // Dark Iron Dwarf - conditional buff
+		[InlineData("NEW1_030", 13.89)] // Deathwing - near the floor
 		public void Matches_training_golden_scores(string cardId, double expected)
 		{
 			var score = Source.GetNormalizedScore(Dbf(cardId));
 
 			Assert.NotNull(score);
-			Assert.Equal(expected, score!.Value, 2);
+			Assert.Equal(expected, score!.Value.Score, 2);
 		}
 
 		[Fact]
@@ -52,13 +61,56 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public void Draftable_hero_cards_are_scored()
 		{
-			// Hero CARDS (not HERO_* skins) are draftable, unlike skins. The
-			// is_hero bonus (+5.28) is largely offset by their constant 30
-			// health (-0.27 each) — the regression fit both together, so the
-			// net value is deliberately modest. Golden from the training tool.
+			// Hero CARDS (not HERO_* skins) are draftable, unlike skins. The is_hero
+			// bonus is fit together with their constant 30 health, so the net value is
+			// what the regression decided, not the raw bonus. With the drawn-win-rate
+			// target hero cards rate high: the bomb gets credit when actually drawn.
+			// Golden from the training tool.
 			var score = Source.GetNormalizedScore(Dbf("ICC_833")); // Frost Lich Jaina
 			Assert.NotNull(score);
-			Assert.Equal(41.30, score!.Value, 2);
+			Assert.Equal(80.15, score!.Value.Score, 2);
+		}
+
+		/// <summary>
+		/// Independent recomputation: parse the embedded json here and recompute
+		/// intercept + Σ w·f and the anchor mapping for EVERY draftable card. This pins
+		/// the whole plumbing (resource embedding, loader, dot product, display anchor)
+		/// with no manual upkeep on re-fits. It cannot replace the golden literals
+		/// above: expected values derived from the json would silently bless a wrong
+		/// json — the literals are the tripwire that a human reviewed the weights.
+		/// </summary>
+		[Fact]
+		public void Scorer_matches_an_independent_recomputation_from_the_embedded_json()
+		{
+			var assembly = typeof(HeuristicArenaDataSource).Assembly;
+			Newtonsoft.Json.Linq.JObject root;
+			using(var stream = assembly.GetManifestResourceStream("HdtArenaHelper.arena_weights.json")!)
+			using(var reader = new System.IO.StreamReader(stream))
+				root = Newtonsoft.Json.Linq.JObject.Parse(reader.ReadToEnd());
+
+			var intercept = (double)root["intercept"]!;
+			var anchor = (double)root["anchor_median_raw"]!;
+			var weights = root["weights"]!.ToObject<System.Collections.Generic.Dictionary<string, double>>()!;
+
+			foreach(var kv in Cards.All)
+			{
+				var card = kv.Value;
+				if(!card.Collectible || card.DbfId == 0 || kv.Key.StartsWith("HERO_", System.StringComparison.Ordinal))
+					continue;
+				if(card.Type != CardType.MINION && card.Type != CardType.SPELL &&
+				   card.Type != CardType.WEAPON && card.Type != CardType.LOCATION &&
+				   card.Type != CardType.HERO)
+					continue;
+
+				var raw = intercept;
+				foreach(var f in HeuristicArenaDataSource.BuildFeatures(card))
+					raw += (weights.TryGetValue(f.Key, out var w) ? w : 0.0) * f.Value;
+				var expected = System.Math.Max(0, System.Math.Min(100, 50 + 15 * (raw - anchor)));
+
+				var actual = Source.GetNormalizedScore(card.DbfId);
+				Assert.NotNull(actual);
+				Assert.Equal(expected, actual!.Value.Score, 6);
+			}
 		}
 
 		[Fact]
@@ -77,8 +129,8 @@ namespace HdtArenaHelper.Tests
 				var score = Source.GetNormalizedScore(card.DbfId);
 				if(score == null)
 					continue; // HERO_* skins
-				Assert.True(score >= 0 && score <= 100,
-					$"{kv.Key} scored {score}, outside [0, 100]");
+				Assert.True(score.Value.Score >= 0 && score.Value.Score <= 100,
+					$"{kv.Key} scored {score.Value.Score}, outside [0, 100]");
 			}
 		}
 	}

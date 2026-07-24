@@ -17,7 +17,9 @@ namespace HdtArenaHelper.Training
 {
 	/// <summary>
 	/// Offline weight-fitting tool for the heuristic. Fetches real arena win-rates
-	/// (HSReplay + Firestone), builds a class-centered dual-source target, and fits the
+	/// (HSReplay + Firestone), builds a class-centered dual-source target from the DRAWN
+	/// win-rate (win-rate of games where the card was actually drawn — the same, less
+	/// deck-strength-confounded metric the runtime sources score with), and fits the
 	/// same ridge model the plugin scores with — reusing <c>HeuristicArenaDataSource.
 	/// BuildFeatures</c> so training and inference share one feature definition.
 	///
@@ -57,8 +59,13 @@ namespace HdtArenaHelper.Training
 				Console.WriteLine($"HSReplay pooled (card,class) rows: {pooled.Count}");
 
 				Console.WriteLine("fetching Firestone per-class stats...");
-				var firestone = BuildFirestone();
+				var (firestone, fsTiers) = BuildFirestone();
 				Console.WriteLine($"Firestone (card,class) rows: {firestone.Count}");
+
+				// The hero-pick tier ranking is the highest-leverage output and is NOT
+				// covered by the per-card fit below: validate it leave-one-source-out on
+				// every retrain (each source's tier list built the way the runtime does).
+				BacktestClassTiers(HsReplayTiers(hs), fsTiers);
 
 				// Rows present in BOTH sources; dual-source averaged target.
 				var rows = new List<Row>();
@@ -102,12 +109,20 @@ namespace HdtArenaHelper.Training
 				var (raw, icept) = Ridge.FitRidgeStandardized(x, y, w, Alpha);
 
 				var generated = RoundWeights(featureNames, raw);
+				var intercept = Math.Round(icept, 2);
+				// Display anchor: the median raw score of the draftable pool, shipped in
+				// the json so the plugin maps the median card to 50 without a hardcoded
+				// constant that would go stale on the next re-fit.
+				var anchor = ComputeAnchorMedianRaw(generated, intercept);
+				Console.WriteLine($"display anchor (pool median raw): {anchor:+0.00;-0.00}");
+
 				var generatedPath = Path.Combine(trainingDir, "arena_weights.generated.json");
-				WriteWeights(generatedPath, Math.Round(icept, 2), generated);
+				WriteWeights(generatedPath, intercept, anchor, generated);
 				Console.WriteLine($"wrote {generatedPath}");
 
 				var committedPath = Path.Combine(trainingDir, "arena_weights.json");
-				Compare(committedPath, Math.Round(icept, 2), generated);
+				Compare(committedPath, intercept, anchor, generated);
+				PrintGoldenScores(generated, intercept, anchor);
 				return 0;
 			}
 			catch(Exception ex)
@@ -117,7 +132,7 @@ namespace HdtArenaHelper.Training
 			}
 		}
 
-		// ---- HSReplay: pooled (card,class) class-centered win_rate --------------
+		// ---- HSReplay: pooled (card,class) class-centered drawn win-rate --------
 
 		private readonly struct Pooled
 		{
@@ -159,7 +174,7 @@ namespace HdtArenaHelper.Training
 				foreach(var c in bucket)
 				{
 					var cardId = (string?)c["card_id"];
-					var wr = (double?)c["win_rate"];
+					var wr = (double?)c["drawn_win_rate"] ?? (double?)c["win_rate"];
 					var n = (int?)c["num_games"] ?? 0;
 					if(string.IsNullOrEmpty(cardId) || wr == null || n < MinGames)
 						continue;
@@ -179,10 +194,12 @@ namespace HdtArenaHelper.Training
 			return result;
 		}
 
-		// ---- Firestone: class-centered winrate (fraction -> pct points) --------
+		// ---- Firestone: class-centered drawn winrate (fraction -> pct points) --
 
-		private static Dictionary<(string, CardClass), double> BuildFirestone()
+		private static (Dictionary<(string, CardClass), double> Centered, Dictionary<CardClass, double> Tiers)
+			BuildFirestone()
 		{
+			var tiers = new Dictionary<CardClass, double>();
 			var result = new Dictionary<(string, CardClass), double>();
 			foreach(CardClass cls in Enum.GetValues(typeof(CardClass)))
 			{
@@ -196,26 +213,96 @@ namespace HdtArenaHelper.Training
 				if(stats == null)
 					continue;
 
-				var entries = new List<(string card, double wr, int decks)>();
+				var entries = new List<(string card, double wr, int drawn)>();
 				foreach(var e in stats)
 				{
 					var cardId = (string?)e["cardId"];
 					var s = e["stats"];
-					var decks = (int?)s?["decksWithCard"] ?? 0;
-					var wins = (int?)s?["decksWithCardThenWin"] ?? 0;
-					if(string.IsNullOrEmpty(cardId) || decks < MinGames)
+					var drawn = (int?)s?["drawn"] ?? 0;
+					var wins = (int?)s?["drawnThenWin"] ?? 0;
+					if(string.IsNullOrEmpty(cardId) || drawn < MinGames)
 						continue;
-					entries.Add((cardId!, wins / (double)decks, decks));
+					entries.Add((cardId!, wins / (double)drawn, drawn));
 				}
 				if(entries.Count < MinClassRows)
 					continue;
 
-				var totalDecks = entries.Sum(t => (double)t.decks);
-				var mean = entries.Sum(t => t.wr * t.decks) / totalDecks; // decks-weighted
+				var totalDrawn = entries.Sum(t => (double)t.drawn);
+				var mean = entries.Sum(t => t.wr * t.drawn) / totalDrawn; // draws-weighted
 				foreach(var t in entries)
 					result[(t.card, cls)] = (t.wr - mean) * 100.0; // to pct points, like HSReplay
+				// Tier the way the runtime does: UNWEIGHTED mean of the class's card rates.
+				tiers[cls] = entries.Average(t => t.wr) * 100.0;
 			}
-			return result;
+			return (result, tiers);
+		}
+
+		/// <summary>Class tiers from the HSReplay buckets, mirroring the runtime
+		/// (unweighted mean of the class's card drawn win-rates, games floor applied).</summary>
+		private static Dictionary<CardClass, double> HsReplayTiers(JObject hs)
+		{
+			var tiers = new Dictionary<CardClass, double>();
+			var data = (JObject?)hs["data"] ?? new JObject();
+			foreach(var prop in data.Properties())
+			{
+				if(prop.Name == "ALL" || !(prop.Value is JArray bucket))
+					continue;
+				if(!Enum.TryParse<CardClass>(prop.Name, ignoreCase: true, out var cls))
+					continue;
+				var rates = new List<double>();
+				foreach(var c in bucket)
+				{
+					var wr = (double?)c["drawn_win_rate"] ?? (double?)c["win_rate"];
+					var n = (int?)c["num_games"] ?? 0;
+					if(wr != null && n >= MinGames)
+						rates.Add(wr.Value);
+				}
+				if(rates.Count >= MinClassRows)
+					tiers[cls] = rates.Average();
+			}
+			return tiers;
+		}
+
+		/// <summary>
+		/// Leave-one-source-out check of the hero-pick tier RANKING: if the two sources
+		/// don't rank the classes the same way, the tier list shown at the hero pick is
+		/// not trustworthy for that patch — investigate before shipping a retrain.
+		/// </summary>
+		private static void BacktestClassTiers(
+			Dictionary<CardClass, double> hsTiers, Dictionary<CardClass, double> fsTiers)
+		{
+			var common = hsTiers.Keys.Where(fsTiers.ContainsKey).ToList();
+			if(common.Count < 6)
+			{
+				Console.WriteLine($"class-tier backtest skipped ({common.Count} common classes).");
+				return;
+			}
+
+			var hsRank = Ranks(common, hsTiers);
+			var fsRank = Ranks(common, fsTiers);
+			double d2 = 0;
+			foreach(var cls in common)
+				d2 += Math.Pow(hsRank[cls] - fsRank[cls], 2);
+			var n = common.Count;
+			var rho = 1.0 - 6.0 * d2 / (n * ((double)n * n - 1));
+
+			Console.WriteLine();
+			Console.WriteLine($"class-tier ranking cross-source agreement (n={n}): Spearman={rho:0.00}");
+			Console.WriteLine($"  HSReplay:  {string.Join(" > ", common.OrderByDescending(c => hsTiers[c]))}");
+			Console.WriteLine($"  Firestone: {string.Join(" > ", common.OrderByDescending(c => fsTiers[c]))}");
+			Console.WriteLine(rho >= 0.7
+				? "  TIER GATE PASS: the sources agree on the hero-pick ranking."
+				: "  TIER GATE WARNING: sources disagree — review the tier list before trusting the hero pick.");
+		}
+
+		private static Dictionary<CardClass, int> Ranks(
+			IReadOnlyList<CardClass> classes, Dictionary<CardClass, double> tiers)
+		{
+			var ordered = classes.OrderByDescending(c => tiers[c]).ToList();
+			var ranks = new Dictionary<CardClass, int>();
+			for(var i = 0; i < ordered.Count; i++)
+				ranks[ordered[i]] = i;
+			return ranks;
 		}
 
 		// ---- output / comparison ----------------------------------------------
@@ -233,19 +320,76 @@ namespace HdtArenaHelper.Training
 			return result;
 		}
 
-		private static void WriteWeights(string path, double intercept, IDictionary<string, double> weights)
+		private static void WriteWeights(string path, double intercept, double anchor,
+			IDictionary<string, double> weights)
 		{
 			var obj = new JObject
 			{
 				["intercept"] = intercept,
+				["anchor_median_raw"] = anchor,
 				["weights"] = JObject.FromObject(weights),
-				["target"] = "avg(HSReplay, Firestone) class-centered arena deck winrate (pct pts)",
+				["target"] = "avg(HSReplay, Firestone) class-centered arena drawn winrate (pct pts)",
 				["trained"] = "regenerated by HdtArenaHelper.Training, ridge alpha=10, sqrt(games) weights"
 			};
 			File.WriteAllText(path, obj.ToString(Formatting.Indented));
 		}
 
-		private static void Compare(string committedPath, double genIntercept, IDictionary<string, double> gen)
+		private static double ScoreRaw(IDictionary<string, double> weights, double intercept, Card card)
+		{
+			var score = intercept;
+			foreach(var kv in HeuristicArenaDataSource.BuildFeatures(card))
+				score += (weights.TryGetValue(kv.Key, out var w) ? w : 0.0) * kv.Value;
+			return score;
+		}
+
+		/// <summary>Median raw score over the draftable pool (collectible, playable, not a HERO_ skin).</summary>
+		private static double ComputeAnchorMedianRaw(IDictionary<string, double> weights, double intercept)
+		{
+			var raws = new List<double>();
+			foreach(var kv in Cards.All)
+			{
+				var card = kv.Value;
+				if(!card.Collectible || card.DbfId == 0 || !Playable.Contains(card.Type))
+					continue;
+				if(kv.Key.StartsWith("HERO_", StringComparison.Ordinal))
+					continue;
+				raws.Add(ScoreRaw(weights, intercept, card));
+			}
+			raws.Sort();
+			var mid = raws.Count / 2;
+			var median = raws.Count % 2 == 1 ? raws[mid] : (raws[mid - 1] + raws[mid]) / 2.0;
+			return Math.Round(median, 2);
+		}
+
+		// The cards pinned by HeuristicArenaDataSourceTests: after adopting a re-fit,
+		// paste these values over the test's golden literals (the manual touch is the
+		// tripwire that proves a human looked at the new weights).
+		private static readonly string[] GoldenCards =
+		{
+			"LOOT_413", "CS2_189", "EX1_093", "CS2_106", "CS2_029", "EX1_050",
+			"GIL_828", "CS2_235", "EX1_046", "NEW1_030", "ICC_833",
+		};
+
+		private static void PrintGoldenScores(IDictionary<string, double> weights, double intercept, double anchor)
+		{
+			Console.WriteLine();
+			Console.WriteLine("golden scores for HeuristicArenaDataSourceTests (paste on adopt):");
+			foreach(var id in GoldenCards)
+			{
+				if(!Cards.All.TryGetValue(id, out var card))
+				{
+					Console.WriteLine($"  {id}: NOT FOUND in HearthDb — replace this golden card");
+					continue;
+				}
+				var raw = ScoreRaw(weights, intercept, card);
+				var norm = Math.Max(0, Math.Min(100, 50 + 15 * (raw - anchor)));
+				Console.WriteLine(FormattableString.Invariant(
+					$"  [InlineData(\"{id}\", {norm:0.00})] // {card.Name}"));
+			}
+		}
+
+		private static void Compare(string committedPath, double genIntercept, double genAnchor,
+			IDictionary<string, double> gen)
 		{
 			if(!File.Exists(committedPath))
 			{
@@ -255,14 +399,16 @@ namespace HdtArenaHelper.Training
 			var committed = JObject.Parse(File.ReadAllText(committedPath));
 			var comWeights = committed["weights"]!.ToObject<Dictionary<string, double>>()!;
 			var comIntercept = (double)committed["intercept"]!;
+			var comAnchor = (double?)committed["anchor_median_raw"] ?? 0.0;
 
 			var keys = comWeights.Keys.Union(gen.Keys).OrderBy(k => k, StringComparer.Ordinal);
-			double maxDiff = Math.Abs(genIntercept - comIntercept);
-			var mismatches = 0;
+			double maxDiff = Math.Max(Math.Abs(genIntercept - comIntercept), Math.Abs(genAnchor - comAnchor));
+			var mismatches = Math.Abs(genAnchor - comAnchor) >= 0.01 ? 1 : 0;
 
 			Console.WriteLine();
 			Console.WriteLine("feature                  committed   generated     diff");
 			Console.WriteLine($"{"intercept",-22}   {comIntercept,8:+0.00;-0.00}   {genIntercept,8:+0.00;-0.00}   {genIntercept - comIntercept,6:+0.00;-0.00}");
+			Console.WriteLine($"{"anchor_median_raw",-22}   {comAnchor,8:+0.00;-0.00}   {genAnchor,8:+0.00;-0.00}   {genAnchor - comAnchor,6:+0.00;-0.00}{(Math.Abs(genAnchor - comAnchor) >= 0.01 ? "  <-- differs" : "")}");
 			foreach(var k in keys)
 			{
 				comWeights.TryGetValue(k, out var cv);

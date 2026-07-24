@@ -7,10 +7,10 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public void Round_trips_its_fields()
 		{
-			var s = new ArenaCardScore(dbfId: 42, includedWinrate: 53.5, includedPopularity: 4.2, games: 1200);
+			var s = new ArenaCardScore(dbfId: 42, drawnWinrate: 53.5, includedPopularity: 4.2, games: 1200);
 
 			Assert.Equal(42, s.DbfId);
-			Assert.Equal(53.5, s.IncludedWinrate);
+			Assert.Equal(53.5, s.DrawnWinrate);
 			Assert.Equal(4.2, s.IncludedPopularity);
 			Assert.Equal(1200, s.Games);
 		}
@@ -26,7 +26,7 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public void DisplayScore_is_the_included_winrate()
 		{
-			var s = new ArenaCardScore(1, includedWinrate: 57.0, includedPopularity: null);
+			var s = new ArenaCardScore(1, drawnWinrate: 57.0, includedPopularity: null);
 
 			Assert.Equal(57.0, s.DisplayScore);
 		}
@@ -34,7 +34,7 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public void DisplayScore_is_zero_when_winrate_unknown()
 		{
-			var s = new ArenaCardScore(1, includedWinrate: null, includedPopularity: null);
+			var s = new ArenaCardScore(1, drawnWinrate: null, includedPopularity: null);
 
 			Assert.Equal(0, s.DisplayScore);
 		}

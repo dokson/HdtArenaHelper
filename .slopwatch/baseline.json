@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "createdAt": "2026-07-24T12:51:40.3150022+00:00",
+  "updatedAt": "2026-07-24T12:51:40.3189696+00:00",
+  "description": "Initial baseline created by 'slopwatch init' on 2026-07-24 12:51:40 UTC",
+  "entries": [
+    {
+      "hash": "9d4a53dc5193e639",
+      "ruleId": "SW005",
+      "filePath": "Directory.Build.props",
+      "lineNumber": 13,
+      "codeSnippet": "<NoWarn>$(NoWarn);CS1591</NoWarn>",
+      "message": "Adding warnings to NoWarn: CS1591",
+      "baselinedAt": "2026-07-24T12:51:40.3186788+00:00"
+    },
+    {
+      "hash": "4776c97d15a25cca",
+      "ruleId": "SW003",
+      "filePath": "HdtArenaHelper/HsReplayArenaDataSource.cs",
+      "lineNumber": 300,
+      "codeSnippet": "catch { /* already gone */ }",
+      "message": "Empty catch block swallows exceptions without handling",
+      "baselinedAt": "2026-07-24T12:51:40.3189329+00:00"
+    },
+    {
+      "hash": "f2a2137e64097dff",
+      "ruleId": "SW003",
+      "filePath": "HdtArenaHelper.Tests/FirestoneArenaDataSourceTests.cs",
+      "lineNumber": 23,
+      "codeSnippet": "catch { /* temp dir */ }",
+      "message": "Empty catch block swallows exceptions without handling",
+      "baselinedAt": "2026-07-24T12:51:40.3189543+00:00"
+    },
+    {
+      "hash": "8c5188f13122ec12",
+      "ruleId": "SW003",
+      "filePath": "HdtArenaHelper.Tests/HsReplayArenaDataSourceTests.cs",
+      "lineNumber": 23,
+      "codeSnippet": "catch { /* temp dir */ }",
+      "message": "Empty catch block swallows exceptions without handling",
+      "baselinedAt": "2026-07-24T12:51:40.3189619+00:00"
+    }
+  ]
+}

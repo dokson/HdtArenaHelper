@@ -44,9 +44,11 @@ namespace HdtArenaHelper
 		private const double DesignHeight = 900.0;
 		// The deck panel occupies the right 1/4.25 of the safe area; picks live in the left 3.25.
 		private const double PlayFraction = 3.25 / 4.25;
-		// The three options (heroes OR cards) sit at the same horizontal positions, packed
-		// tighter than an even 3-way split of the play region. Tuned against a live hero pick.
-		private const double OptionSpreadFraction = 0.28;
+		// Horizontal spacing of the three options, as a fraction of the play region,
+		// live-tuned: hero portraits sit wider; plain cards and legendary-group columns
+		// share the same layout in the client, so they share one spread.
+		private const double HeroSpreadFraction = 0.29;
+		private const double CardSpreadFraction = 0.26;
 
 		private readonly Canvas _canvas;
 		private bool _nativePlaqueUnavailable;
@@ -116,16 +118,37 @@ namespace HdtArenaHelper
 				return;
 
 			var best = double.MinValue;
+			var anyWinrate = false;
 			foreach(var e in entries)
-				if(e.Score.HasData && e.Score.Value > best)
+			{
+				if(!e.Score.HasData)
+					continue;
+				// A score backed by an actual game sample, not just the offline model.
+				if(e.Score.MaxGames != null)
+					anyWinrate = true;
+				if(e.Score.Value > best)
 					best = e.Score.Value;
+			}
 
 			var playWidth = DesignWidth * PlayFraction;
 			var playCentre = playWidth / 2.0;
-			var spread = playWidth * OptionSpreadFraction;
-			// Same 3 horizontal positions in both phases; only the vertical anchor differs
-			// (hero portraits vs the lower card row). Card Y still to be tuned on a live draft.
-			var centreY = isHeroPick ? DesignHeight * 0.44 : DesignHeight * 0.55;
+
+			// No option is backed by real win-rate data (offline, curl blocked, or the
+			// hero pick before the tier list loaded): say so once, centred — otherwise
+			// heuristic-only plaques would look authoritative while the real signal is
+			// silently missing.
+			if(!anyWinrate)
+			{
+				var note = BuildLabel("win-rate data unavailable — check connection or use Refresh data", dimmed: true);
+				note.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+				Canvas.SetLeft(note, playCentre - note.DesiredSize.Width / 2.0);
+				Canvas.SetTop(note, DesignHeight * 0.72);
+				_canvas.Children.Add(note);
+			}
+			var spread = playWidth * (isHeroPick ? HeroSpreadFraction : CardSpreadFraction);
+			// Vertical anchors, both live-tuned: hero plaques hug the portrait bottom
+			// (also keeps our labels off the game's own hero names), cards sit lower.
+			var centreY = isHeroPick ? DesignHeight * 0.43 : DesignHeight * 0.55;
 
 			Log($"layout heroPick={isHeroPick} playW={playWidth:0} centre={playCentre:0} spread={spread:0} centreY={centreY:0}");
 
@@ -148,14 +171,31 @@ namespace HdtArenaHelper
 				_canvas.Children.Add(plaque);
 
 				// Label under the plaque so the score is unambiguously tied to its option.
-				var label = BuildLabel(e.Label);
+				// Low-confidence scores (thin or heuristic-only data) are dimmed and
+				// starred so they stop looking as authoritative as well-sampled ones.
+				var lowConfidence = e.Score.HasData && e.Score.IsLowConfidence;
+				var label = BuildLabel(lowConfidence ? e.Label + " *" : e.Label, lowConfidence);
 				label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 				Canvas.SetLeft(label, centreX - label.DesiredSize.Width / 2.0);
 				Canvas.SetTop(label, top + h + 4.0);
 				_canvas.Children.Add(label);
 
+				// The dominant synergy reason, when one fired ("fills the 3-drop gap").
+				// Marked (exp.): the synergy rules are unvalidated by design (see AGENTS),
+				// and the label keeps that honest at the point of use.
+				if(e.Score.SynergyReason != null)
+				{
+					var reason = BuildReason(e.Score.SynergyReason + " (exp.)");
+					reason.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+					Canvas.SetLeft(reason, centreX - reason.DesiredSize.Width / 2.0);
+					Canvas.SetTop(reason, top + h + 4.0 + label.DesiredSize.Height + 2.0);
+					_canvas.Children.Add(reason);
+				}
+
 				Log($"  plaque[{i}] '{e.Label}' cx={centreX:0} y={top:0} w={w:0} h={h:0} " +
-					$"score={(e.Score.HasData ? Math.Round(e.Score.Value).ToString() : "-")}");
+					$"score={(e.Score.HasData ? Math.Round(e.Score.Value).ToString() : "-")}" +
+					$"{(lowConfidence ? " lowConf" : "")}" +
+					$"{(e.Score.SynergyReason != null ? $" reason='{e.Score.SynergyReason}'" : "")}");
 			}
 		}
 
@@ -193,7 +233,7 @@ namespace HdtArenaHelper
 			}
 		}
 
-		private static FrameworkElement BuildLabel(string text)
+		private static FrameworkElement BuildLabel(string text, bool dimmed = false)
 			=> new Border
 			{
 				Background = new SolidColorBrush(Color.FromArgb(200, 12, 12, 14)),
@@ -204,12 +244,29 @@ namespace HdtArenaHelper
 					Text = text,
 					FontSize = 15,
 					FontWeight = FontWeights.Bold,
-					Foreground = Brushes.White,
+					Foreground = dimmed ? Brushes.Silver : Brushes.White,
 					TextAlignment = TextAlignment.Center
 				},
+				Opacity = dimmed ? 0.8 : 1.0,
 				Effect = new System.Windows.Media.Effects.DropShadowEffect
 				{
 					Color = Colors.Black, BlurRadius = 6, ShadowDepth = 0, Opacity = 0.85
+				}
+			};
+
+		// Smaller, quieter line under the label: the synergy "why", not a second score.
+		private static FrameworkElement BuildReason(string text)
+			=> new Border
+			{
+				Background = new SolidColorBrush(Color.FromArgb(170, 12, 12, 14)),
+				CornerRadius = new CornerRadius(4),
+				Padding = new Thickness(6, 0, 6, 1),
+				Child = new TextBlock
+				{
+					Text = text,
+					FontSize = 11,
+					Foreground = Brushes.LightGray,
+					TextAlignment = TextAlignment.Center
 				}
 			};
 

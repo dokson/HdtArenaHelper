@@ -9,7 +9,7 @@ namespace HdtArenaHelper.Tests
 		{
 			var engine = new NullSynergyEngine();
 
-			Assert.Equal(0, engine.GetSynergyBonus(offeredDbfId: 100, new int[0]));
+			Assert.Equal(0, engine.GetSynergy(offeredDbfId: 100, new int[0]).Bonus);
 		}
 
 		[Fact]
@@ -17,7 +17,7 @@ namespace HdtArenaHelper.Tests
 		{
 			var engine = new NullSynergyEngine();
 
-			Assert.Equal(0, engine.GetSynergyBonus(100, new[] { 1, 2, 3, 100, 100 }));
+			Assert.Equal(0, engine.GetSynergy(100, new[] { 1, 2, 3, 100, 100 }).Bonus);
 		}
 	}
 }

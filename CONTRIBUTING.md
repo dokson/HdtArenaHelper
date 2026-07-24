@@ -42,19 +42,22 @@ Bypass a single commit with `git commit --no-verify` if needed.
 
 ## Data & ethics
 
-The plugin uses **only free, public data** (the HSReplay public arena endpoint) and card
-metadata already shipped with HDT. Do **not** add code that scrapes a paywalled service
-or bundles/redistributes anyone's proprietary tier data. Network code must cache, use a
-browser User-Agent, and fail soft.
+The plugin uses **only free, public data** (the HSReplay and Firestone public arena
+endpoints) and card metadata already shipped with HDT. Do **not** add code that scrapes a
+paywalled service or bundles/redistributes anyone's proprietary tier data. Network code
+must cache and fail soft; note that for hsreplay.net a browser User-Agent alone is NOT
+enough (Cloudflare fingerprints the TLS stack) — the runtime shells out to `curl`.
 
 ## The heuristic weights
 
 The offline heuristic's weights are produced by the weight-fitting pipeline in
 [`HdtArenaHelper.Training/`](HdtArenaHelper.Training/) and embedded as `arena_weights.json`
 (single source of truth — no coefficients are hardcoded). They describe the current card
-pool, so **re-fit them per patch/rotation** and open a PR with the regenerated file; review
-the weight diff before merging (a data blip should not silently ship). See
-`HdtArenaHelper.Training/README.md`.
+pool, so they are **re-fit weekly by the scheduled `retrain` workflow**
+(`.github/workflows/train.yml`), which opens a PR with the weight diff when they moved —
+check for an open bot PR before re-fitting by hand. Either way, review the weight diff
+before merging (a data blip should not silently ship) and update the golden tests from
+the trainer's printed values. See `HdtArenaHelper.Training/README.md`.
 
 ## Pull requests
 

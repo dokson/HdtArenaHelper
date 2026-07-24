@@ -7,8 +7,12 @@ namespace HdtArenaHelper
 	{
 		public int DbfId { get; }
 
-		/// <summary>Winrate of games where this card was in the deck (0-100), or null if unknown.</summary>
-		public double? IncludedWinrate { get; }
+		/// <summary>
+		/// Drawn win-rate: win-rate of games where this card was actually drawn (0-100),
+		/// or null if unknown. Falls back to the deck-inclusion win-rate for the rare
+		/// entry that lacks the drawn metric.
+		/// </summary>
+		public double? DrawnWinrate { get; }
 
 		/// <summary>How often the card is drafted (0-100), or null if unknown.</summary>
 		public double? IncludedPopularity { get; }
@@ -16,19 +20,18 @@ namespace HdtArenaHelper
 		/// <summary>Sample size behind the win-rate, if known (used to prefer robust entries).</summary>
 		public int? Games { get; }
 
-		public ArenaCardScore(int dbfId, double? includedWinrate, double? includedPopularity, int? games = null)
+		public ArenaCardScore(int dbfId, double? drawnWinrate, double? includedPopularity, int? games = null)
 		{
 			DbfId = dbfId;
-			IncludedWinrate = includedWinrate;
+			DrawnWinrate = drawnWinrate;
 			IncludedPopularity = includedPopularity;
 			Games = games;
 		}
 
 		/// <summary>
-		/// A single 0-100 number to display/sort by. For now this is just the
-		/// included winrate; a richer tier model would blend winrate, popularity
-		/// and deck-context synergies here.
+		/// A single 0-100 number to display/sort by: the raw drawn win-rate. The blended
+		/// tier score (shrinkage, normalization, synergy) lives in the scoring pipeline.
 		/// </summary>
-		public double DisplayScore => IncludedWinrate ?? 0;
+		public double DisplayScore => DrawnWinrate ?? 0;
 	}
 }

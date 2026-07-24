@@ -1,0 +1,46 @@
+name: dependabot-automerge
+
+# Squash-merges a Dependabot PR once the `build` workflow (build -warnaserror +
+# tests + slopwatch) has gone green on it. Triggered by workflow_run rather than
+# pull_request so the merge only happens *after* CI passes, without needing branch
+# protection or repo auto-merge settings. All Dependabot deps here are dev/CI-only
+# (test SDK, Math.NET in training, actions) — none ship in the plugin DLL — so a
+# bad bump can only fail CI, which blocks this merge.
+
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    steps:
+      - name: Squash-merge the Dependabot PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD" --state open \
+                 --json number,author --jq '.[0]')
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "No open PR for branch $HEAD; nothing to merge."
+            exit 0
+          fi
+          author=$(echo "$pr" | jq -r '.author.login')
+          number=$(echo "$pr" | jq -r '.number')
+          if [ "$author" != "dependabot[bot]" ] && [ "$author" != "app/dependabot" ]; then
+            echo "PR #$number authored by $author, not Dependabot; skipping."
+            exit 0
+          fi
+          echo "Merging Dependabot PR #$number (branch $HEAD)."
+          gh pr merge "$number" --repo "$REPO" --squash --delete-branch

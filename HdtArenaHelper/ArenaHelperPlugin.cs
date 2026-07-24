@@ -33,11 +33,23 @@ namespace HdtArenaHelper
 			"into a single 0-100 score per pick, with deck synergy. Uses no paid " +
 			"or scraped data.";
 		public string ButtonText => "Refresh data";
-		public string Author => "dokson";
-		public Version Version => new Version(0, 1, 0);
+		public string Author => "Alessandro Colace";
+		// Version.props is the single source of truth; read it back from the assembly
+		// so a release bump cannot drift from what this property reports.
+		public Version Version
+		{
+			get
+			{
+				var v = typeof(ArenaHelperPlugin).Assembly.GetName().Version;
+				return v == null ? new Version(0, 0, 0) : new Version(v.Major, v.Minor, v.Build);
+			}
+		}
 
 		private readonly DraftWatcher _watcher = new DraftWatcher();
-		private ScoreAggregator? _aggregator;
+		// Card map builds lazily on first use, so constructing at OnLoad (HearthDb may
+		// still be empty) is safe.
+		private readonly MetadataSynergyEngine _synergy = new MetadataSynergyEngine();
+		private volatile ScoreAggregator? _aggregator;
 		private ArenaOverlayWindow? _overlay;
 		private MenuItem? _menuItem;
 		private bool _enabled = true;
@@ -45,9 +57,15 @@ namespace HdtArenaHelper
 		private bool _nativeOverlaySaved;
 
 		private volatile bool _dataReady;            // sources have finished their load attempt
+		private volatile int _warmGeneration;        // bumped per WarmData; a superseded loop stops
+		// Pairs the generation check with the _dataReady write: without it a superseded
+		// loop could pass the check, get preempted by a Refresh (bump + reset), then
+		// stamp _dataReady with the OLD aggregator's verdict.
+		private readonly object _warmLock = new object();
 		private DraftChoicesEventArgs? _lastChoices; // current pick (null between picks)
 		private DraftChoicesEventArgs? _renderedChoices; // what the overlay currently shows
 		private bool _renderedReady;                 // data-ready state the overlay was built with
+		private int _renderedSources;                // LoadedSourceCount the overlay was built with
 
 		private static string CacheDir =>
 			Path.Combine(Config.AppDataPath, "ArenaHelper");
@@ -56,17 +74,17 @@ namespace HdtArenaHelper
 		{
 			try
 			{
-				_aggregator = BuildAggregator();
-				_aggregator.SetSynergyEngine(new NullSynergyEngine()); // replaced by the full port
+				// Wire fully, THEN publish: _aggregator is volatile and read off this
+				// thread, so nothing may observe it before the synergy engine is set.
+				var aggregator = BuildAggregator();
+				aggregator.SetSynergyEngine(_synergy);
+				_aggregator = aggregator;
 
 				_watcher.OnChoicesChanged += OnChoicesChanged;
 				_watcher.OnDraftEnded += OnDraftEnded;
-				_watcher.Reset();
 
-				// Reset render/pick state so re-enabling mid-draft never shows a stale pick.
-				_lastChoices = null;
-				_renderedChoices = null;
-				_renderedReady = false;
+				// Clear watcher + pick/render state so a stale pick can't bleed in.
+				ResetDraftState();
 
 				// Created here on HDT's UI thread; all overlay access stays on this thread.
 				_overlay = new ArenaOverlayWindow();
@@ -112,11 +130,18 @@ namespace HdtArenaHelper
 				var choices = _lastChoices;
 				var want = choices != null && _dataReady;
 
-				// (Re)build the plaques only when the pick or data-readiness actually changes.
-				if(want && (!ReferenceEquals(choices, _renderedChoices) || _dataReady != _renderedReady))
+				// (Re)build the plaques when the pick changes OR when another data source
+				// has come online since the last render (the heuristic is loaded instantly,
+				// so the first render of a pick may predate the win-rate downloads — a
+				// bool "ready" latch alone would leave those scores stale forever).
+				var loadedSources = _aggregator?.LoadedSourceCount ?? 0;
+				if(want && (!ReferenceEquals(choices, _renderedChoices)
+					|| _dataReady != _renderedReady
+					|| loadedSources != _renderedSources))
 				{
 					_renderedChoices = choices;
 					_renderedReady = _dataReady;
+					_renderedSources = loadedSources;
 					RenderContent(choices!);
 				}
 
@@ -131,20 +156,29 @@ namespace HdtArenaHelper
 		public void OnButtonPress()
 		{
 			Log.Info("[ArenaHelper] refresh requested");
-			// Drop any cached network data and rebuild.
+			// Mark caches stale rather than deleting them: the rebuilt sources re-download,
+			// but if the network is down they fall back to the day-old data (see the sources'
+			// stale-cache path) instead of blacking out the session. Per-file: a superseded
+			// warm-up may hold one file open mid-write, which must not spare the others.
 			try
 			{
-				var file = Path.Combine(CacheDir, "hsreplay_arena.json");
-				if(File.Exists(file))
-					File.Delete(file);
+				var caches = new List<string> { Path.Combine(CacheDir, "hsreplay_arena.json") };
+				caches.AddRange(Directory.GetFiles(CacheDir, "firestone_*.json"));
+				var staleTime = DateTime.UtcNow - TimeSpan.FromDays(2);
+				foreach(var file in caches.Where(File.Exists))
+				{
+					try { File.SetLastWriteTimeUtc(file, staleTime); }
+					catch(Exception ex) { Log.Error($"[ArenaHelper] refresh: could not mark {file} stale: {ex.Message}"); }
+				}
 			}
 			catch(Exception ex)
 			{
 				Log.Error("[ArenaHelper] refresh failed: " + ex);
 			}
 
-			_aggregator = BuildAggregator();
-			_aggregator.SetSynergyEngine(new NullSynergyEngine());
+			var aggregator = BuildAggregator();
+			aggregator.SetSynergyEngine(_synergy);
+			_aggregator = aggregator; // publish only once fully wired
 			_renderedChoices = null; // force a re-render once fresh data is in
 			WarmData();
 		}
@@ -158,7 +192,12 @@ namespace HdtArenaHelper
 			var aggregator = _aggregator;
 			if(aggregator == null)
 				return;
-			_dataReady = false;
+			int generation;
+			lock(_warmLock)
+			{
+				generation = ++_warmGeneration; // supersede any warm-up still running (e.g. Refresh)
+				_dataReady = false;
+			}
 			Log.Info("[ArenaHelper] loading source data...");
 			Task.Run(async () =>
 			{
@@ -168,6 +207,9 @@ namespace HdtArenaHelper
 				const int maxAttempts = 30;
 				for(var attempt = 1; ; attempt++)
 				{
+					if(generation != _warmGeneration)
+						return; // a newer warm-up superseded us; stop touching shared state
+
 					try
 					{
 						await aggregator.EnsureLoadedAsync().ConfigureAwait(false);
@@ -177,6 +219,20 @@ namespace HdtArenaHelper
 						Log.Error("[ArenaHelper] data load failed: " + ex);
 					}
 
+					// Partial data beats a blank overlay: render as soon as ANY source has
+					// data, while the loop keeps retrying the stragglers in the background
+					// (OnUpdate re-renders as LoadedSourceCount grows). Generation check
+					// and write happen under one lock: a bare check-then-act would let a
+					// superseded loop stamp _dataReady right after a Refresh reset it.
+					if(aggregator.LoadedSourceCount > 0)
+					{
+						lock(_warmLock)
+						{
+							if(generation == _warmGeneration)
+								_dataReady = true;
+						}
+					}
+
 					if(aggregator.IsLoaded)
 					{
 						Log.Info($"[ArenaHelper] source data ready (attempt {attempt})");
@@ -184,26 +240,36 @@ namespace HdtArenaHelper
 					}
 					if(attempt >= maxAttempts)
 					{
-						Log.Info($"[ArenaHelper] source data still unavailable after {attempt} attempts");
+						Log.Info($"[ArenaHelper] source data still incomplete after {attempt} attempts");
 						break;
 					}
 					await Task.Delay(2000).ConfigureAwait(false);
 				}
-				_dataReady = true;
+				// Don't claim ready if nothing loaded (total failure) — keep the overlay gate shut.
+				lock(_warmLock)
+				{
+					if(generation == _warmGeneration)
+						_dataReady = aggregator.LoadedSourceCount > 0;
+				}
 			});
 		}
 
 		/// <summary>
-		/// The active blend of data sources. Real arena win-rates
-		/// (<see cref="HsReplayArenaDataSource"/>) drive the score; the offline
-		/// <see cref="HeuristicArenaDataSource"/> is a weak fallback for cards the win-rate
-		/// data has not covered. Add further sources here to blend them in.
+		/// The active blend of data sources. HSReplay and Firestone measure the SAME
+		/// quantity (drawn win-rate), so they are one consensus signal at a combined
+		/// weight of 1.0 (0.5 each), not two independent votes — otherwise adding the
+		/// second source would silently demote the heuristic from 1/3 to 1/5 of the
+		/// blend. Where both cover a card the consensus averages their sampling noise;
+		/// if either endpoint goes dark the survivor carries the win-rate signal (then
+		/// weighted evenly against the heuristic — the price of fixed weights). The
+		/// offline <see cref="HeuristicArenaDataSource"/> backstops cards neither covers.
 		/// </summary>
 		private static ScoreAggregator BuildAggregator()
 		{
 			var sources = new List<IArenaDataSource>
 			{
-				new HsReplayArenaDataSource(CacheDir, weight: 1.0),
+				new HsReplayArenaDataSource(CacheDir, weight: 0.5),
+				new FirestoneArenaDataSource(CacheDir, weight: 0.5),
 				new HeuristicArenaDataSource(weight: 0.5),
 			};
 			return new ScoreAggregator(sources);
@@ -225,6 +291,7 @@ namespace HdtArenaHelper
 					Log.Info($"[ArenaHelper] enabled = {_enabled}");
 					if(_enabled)
 					{
+						ResetDraftState();            // don't resurrect a stale pick from a previous run
 						SuppressNativeArenaOverlay(); // take over from HDT's built-in overlay
 					}
 					else
@@ -241,6 +308,18 @@ namespace HdtArenaHelper
 
 				return _menuItem;
 			}
+		}
+
+		// Clears the watcher's dedup state and the pick/render state. Run on load AND on
+		// re-enable: without it, re-enabling in a later run whose DraftChoices.Version
+		// collides with the frozen one would be deduped away and the old pick re-shown.
+		private void ResetDraftState()
+		{
+			_watcher.Reset();
+			_lastChoices = null;
+			_renderedChoices = null;
+			_renderedReady = false;
+			_renderedSources = 0;
 		}
 
 		private void OnChoicesChanged(object sender, DraftChoicesEventArgs e)
@@ -269,8 +348,8 @@ namespace HdtArenaHelper
 			{
 				var isGroup = option.PackageDbfIds.Count > 0;
 				var score = isGroup
-					? ScoreGroup(option, e.DraftedDbfIds)
-					: _aggregator.Score(option.DbfId, e.DraftedDbfIds);
+					? ScoreGroup(option, e.DraftedDbfIds, e.DraftClass)
+					: _aggregator.Score(option.DbfId, e.DraftedDbfIds, e.DraftClass);
 				var label = isHeroPick
 					? HeroClassName(option.CardId)
 					: isGroup
@@ -289,7 +368,8 @@ namespace HdtArenaHelper
 		// Underground "legendary group": the pick's value is the legendary PLUS its 3-card
 		// package, so score all four and average the ones we have data for (the average card
 		// quality you actually add to the deck).
-		private BlendedScore ScoreGroup(DraftOption option, IReadOnlyCollection<int> draftedDbfIds)
+		private BlendedScore ScoreGroup(DraftOption option, IReadOnlyCollection<int> draftedDbfIds,
+			HearthDb.Enums.CardClass draftClass)
 		{
 			if(_aggregator == null)
 				return BlendedScore.Empty;
@@ -298,11 +378,17 @@ namespace HdtArenaHelper
 			ids.AddRange(option.PackageDbfIds);
 
 			var values = new List<double>();
+			int? maxGames = null;
 			foreach(var id in ids)
 			{
-				var s = _aggregator.Score(id, draftedDbfIds);
-				if(s.HasData)
-					values.Add(s.Value);
+				var s = _aggregator.Score(id, draftedDbfIds, draftClass);
+				if(!s.HasData)
+					continue;
+				values.Add(s.Value);
+				// Carry the group's best sample so the confidence flag reflects the
+				// underlying data, not the synthesized "group avg" component.
+				if(s.MaxGames.HasValue && s.MaxGames.Value > (maxGames ?? -1))
+					maxGames = s.MaxGames;
 			}
 			if(values.Count == 0)
 				return BlendedScore.Empty;
@@ -310,7 +396,7 @@ namespace HdtArenaHelper
 			var mean = values.Average();
 			var components = new List<ScoreComponent>
 			{
-				new ScoreComponent($"group avg {values.Count}/{ids.Count}", mean, 1.0)
+				new ScoreComponent($"group avg {values.Count}/{ids.Count}", mean, 1.0, maxGames)
 			};
 			return new BlendedScore(mean, components, 0);
 		}
