@@ -143,10 +143,10 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public async Task Two_printings_of_the_same_card_pool_their_samples()
 		{
-			// The reason the rule above matters: the feeds report different PRINTINGS of the same
-			// card (HSReplay says CORE_YOP_001, Firestone says YOP_001), so joining on the raw dbf id
-			// split 216 cards into one-source-only entries. Both printings must land on one identity,
-			// and either printing's dbf id must find it.
+			// The reason the rule above matters: the same card is reported under different PRINTINGS
+			// (CORE_YOP_001 and YOP_001 are one card), so keying on the raw dbf id split 216 cards
+			// into separate thin entries. Both printings must land on one identity, and either
+			// printing's dbf id must find it.
 			const string payload = @"{
 				""data"": { ""ALL"": [
 					{ ""card_id"": ""YOP_001"", ""drawn_win_rate"": 60.0, ""num_games"": 1000 },

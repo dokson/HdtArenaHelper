@@ -12,8 +12,9 @@ namespace HdtArenaHelper.Training
 	{
 		internal const string HsReplayUrl =
 			"https://hsreplay.net/api/v1/arena/card_stats/free/?format=json";
-		internal const string FirestoneUrlFmt =
-			"https://static.zerotoheroes.com/api/arena/stats/cards/arena-underground/last-patch/{0}.gz.json";
+		// One endpoint, one host. A second feed was withdrawn in 0.1.5 at its provider's request:
+		// do not add that one, or any other host, without asking first and recording the answer in
+		// AGENTS.md.
 		internal const string UserAgent =
 			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 			"(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";

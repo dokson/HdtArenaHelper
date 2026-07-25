@@ -26,19 +26,21 @@ namespace HdtArenaHelper.Tests
 		/// re-running the trainer and reading the scores.
 		/// </summary>
 		[Theory]
-		[InlineData("LOOT_413", 19.78)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 40.34)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 38.20)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 51.95)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 52.93)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 32.49)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 54.02)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 53.76)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 30.28)]  // Dark Iron Dwarf - conditional buff
-		// The LEGENDARY of the set, and a card whose statline is genuinely bad: it fell from
-		// 16.01 to 5.12 when `is_legendary` was removed, i.e. the label had been worth ~10
-		// display points on its own. That is the number this literal exists to keep honest.
-		[InlineData("NEW1_030", 5.12)]  // Deathwing - at the floor, where it belongs
+		[InlineData("LOOT_413", 24.63)] // Plated Beetle - vanilla-ish minion
+		[InlineData("CS2_189", 56.05)]  // Elven Archer - battlecry damage
+		[InlineData("EX1_093", 40.83)]  // Defender of Argus - buff + taunt text
+		[InlineData("CS2_106", 50.33)]  // Fiery War Axe - weapon path
+		[InlineData("CS2_029", 57.61)]  // Fireball - spell with damage magnitude
+		[InlineData("EX1_050", 43.29)]  // Coldlight Oracle - draw text
+		[InlineData("GIL_828", 50.88)]  // Dire Frenzy - buff spell
+		[InlineData("CS2_235", 47.36)]  // Northshire Cleric - persistent draw
+		[InlineData("EX1_046", 28.86)]  // Dark Iron Dwarf - conditional buff
+		// The LEGENDARY of the set, and a card whose statline is genuinely bad. It went 16.01 ->
+		// 5.12 when `is_legendary` was removed (the label alone had been worth ~10 display points),
+		// and it sits at the clamp floor under the single-source fit. A 0 here is not a bug: it is
+		// a 10-mana 12/12 that hands the opponent the board, scored by a model that no longer gets
+		// to like it for being rare.
+		[InlineData("NEW1_030", 0.00)]  // Deathwing - at the floor, where it belongs
 		public void Matches_training_golden_scores(string cardId, double expected)
 		{
 			var score = Source.GetNormalizedScore(Dbf(cardId));

@@ -35,20 +35,20 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
-	/// One card on the mulligan screen: its keep record for the drafted class, or null stats when the
-	/// sample is too thin to state. Deliberately NOT an <see cref="OverlayEntry"/> — these are
-	/// percentage points, not the 0-100 blend, and rendering them through the same plaque would
-	/// invite reading a 55 here as a 55 there.
+	/// One card on the mulligan screen: a KEEP/TOSS verdict judged against the drafted deck, plus
+	/// the deck fact behind it. Deliberately NOT an <see cref="OverlayEntry"/> — the draft plaque
+	/// shows a 0-100 blend and this shows a decision, and putting the two in the same badge would
+	/// invite reading one as the other.
 	/// </summary>
 	public class MulliganOverlayEntry
 	{
 		public string Label { get; }
-		public MulliganCardStats? Stats { get; }
+		public MulliganCardVerdict Verdict { get; }
 
-		public MulliganOverlayEntry(string label, MulliganCardStats? stats)
+		public MulliganOverlayEntry(string label, MulliganCardVerdict verdict)
 		{
 			Label = label;
-			Stats = stats;
+			Verdict = verdict;
 		}
 	}
 
@@ -334,14 +334,12 @@ namespace HdtArenaHelper
 
 
 		/// <summary>
-		/// Render the mulligan screen: per card, the win-rate of games where it was KEPT and how often
-		/// players keep it, for the drafted class. Call on the UI thread.
+		/// Render the mulligan screen: per card, a KEEP/TOSS call judged against the drafted deck and
+		/// the deck fact behind it. Call on the UI thread.
 		///
-		/// Presented as an estimate on purpose, and the wording carries three caveats the data cannot
-		/// remove: it is a single source (only Firestone publishes these counters, so there is no
-		/// consensus), it is not causal (a card is kept in hands that already look good, so part of a
-		/// high keep win-rate is the hand and not the card), and the sample is small. A card with too
-		/// thin a sample shows a dash rather than a number nobody could act on.
+		/// A word and a reason, never a percentage — the reason IS the advice, and it is what lets a
+		/// player disagree with us on the spot. Most cards show a dash, which is not a gap: three
+		/// confident calls per hand would bury the one worth reading.
 		/// </summary>
 		public void SetMulligan(IReadOnlyList<MulliganOverlayEntry> entries)
 		{
@@ -361,108 +359,40 @@ namespace HdtArenaHelper
 				var e = entries[i];
 				var x = centreX + (i - (entries.Count - 1) / 2.0) * spread;
 
-				var keep = e.Stats == null
-					? "–"
-					: $"{e.Stats.Value.KeepWinRate:0.#}%";
-				var head = BuildLabel(keep, dimmed: e.Stats == null);
+				// The verdict is a WORD, not a number, and the dash is a real answer: most cards in
+				// most hands have nothing decisive said about them, and printing a confident verdict
+				// on all three would make the two that matter invisible.
+				var word = e.Verdict.Verdict == MulliganVerdict.Keep ? "KEEP"
+					: e.Verdict.Verdict == MulliganVerdict.Toss ? "TOSS"
+					: "–";
+				// Colour carries the verdict faster than the word does, which matters on a screen
+				// with a timer running: green and red are read before they are parsed, and the
+				// dash stays grey so "no call" cannot be mistaken for either.
+				var colour = e.Verdict.Verdict == MulliganVerdict.Keep ? KeepBrush
+					: e.Verdict.Verdict == MulliganVerdict.Toss ? TossBrush
+					: null;
+				var head = BuildLabel(word, dimmed: e.Verdict.Verdict == MulliganVerdict.Situational,
+					colour: colour);
 				head.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 				Canvas.SetLeft(head, x - head.DesiredSize.Width / 2.0);
 				Canvas.SetTop(head, centreY);
 				_canvas.Children.Add(head);
 
-				// The gauge under the number, drawn by us rather than borrowed: HDT's own red-to-green
-				// bar has no settable properties and its view-model demands an HSReplay mulligan-guide
-				// response object, so driving it would mean dressing Firestone-derived numbers as data
-				// from a product that does not publish arena mulligan stats at all.
-				var gaugeY = centreY + head.DesiredSize.Height + 2.0;
-				if(e.Stats != null)
-				{
-					var gauge = BuildKeepGauge(e.Stats.Value);
-					Canvas.SetLeft(gauge, x - MulliganGaugeWidth / 2.0);
-					Canvas.SetTop(gauge, gaugeY);
-					_canvas.Children.Add(gauge);
-					gaugeY += MulliganGaugeHeight + 3.0;
-				}
-
-				// Keep rate and sample size on the quiet line: they qualify the number above rather
-				// than competing with it, and the sample size is the reader's own confidence check.
-				var detail = e.Stats == null
-					? "too few games"
-					: $"kept {e.Stats.Value.KeepRate:0}% · {e.Stats.Value.Games} games (est.)";
+				// The reason carries the whole justification, so it is not decoration: "KEEP" alone
+				// is an instruction, "KEEP — only 4 early bodies in the deck" is a checkable claim
+				// the player can disagree with.
+				var detail = e.Verdict.Reason ?? "no clear call from the deck";
 				var sub = BuildReason(detail);
 				sub.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 				Canvas.SetLeft(sub, x - sub.DesiredSize.Width / 2.0);
-				Canvas.SetTop(sub, gaugeY);
+				Canvas.SetTop(sub, centreY + head.DesiredSize.Height + 2.0);
 				_canvas.Children.Add(sub);
 
-				Log($"  mulligan[{i}] '{e.Label}' x={x:0} keepWr={keep} " +
-					$"games={(e.Stats?.Games.ToString() ?? "-")}");
+				Log($"  mulligan[{i}] '{e.Label}' x={x:0} verdict={e.Verdict.Verdict} " +
+					$"reason='{e.Verdict.Reason}'");
 			}
 		}
 
-
-		// Gauge geometry, in design-space units like everything else on this canvas.
-		private const double MulliganGaugeWidth = 92.0;
-		private const double MulliganGaugeHeight = 7.0;
-		/// <summary>
-		/// Half-width of the window the gauge spans, in percentage points AROUND THE CLASS AVERAGE.
-		/// Arena keep win-rates cluster within a few points of 50, so a bar drawn on the absolute
-		/// 0-100 value would sit mid-track for every card and say nothing. Deliberately wide enough
-		/// that a card has to be genuinely better than its class's average keep to read as green.
-		/// </summary>
-		private const double MulliganGaugeSpanPoints = 6.0;
-
-		/// <summary>
-		/// A red-to-green bar for one card's keep win-rate, RELATIVE to that class's average keep.
-		/// The colour therefore means "better or worse than an average keep here", which is a claim
-		/// the data supports — an absolute colour scale would not be.
-		///
-		/// Not a confidence display: the sample size is stated in words next to it, because a colour
-		/// cannot say "measured on 40 games" and this feed is thin (see MulliganCardStats).
-		/// </summary>
-		private static FrameworkElement BuildKeepGauge(MulliganCardStats stats)
-		{
-			var delta = stats.KeepWinRate - stats.ClassAverage;
-			var t = Math.Max(0.0, Math.Min(1.0,
-				0.5 + delta / (2.0 * MulliganGaugeSpanPoints)));
-
-			var track = new Border
-			{
-				Width = MulliganGaugeWidth,
-				Height = MulliganGaugeHeight,
-				CornerRadius = new CornerRadius(MulliganGaugeHeight / 2.0),
-				Background = new SolidColorBrush(Color.FromArgb(0x66, 0x10, 0x10, 0x12)),
-				BorderThickness = new Thickness(1),
-				BorderBrush = new SolidColorBrush(Color.FromArgb(0x88, 0, 0, 0)),
-			};
-			var fill = new Border
-			{
-				Width = Math.Max(MulliganGaugeHeight, MulliganGaugeWidth * t),
-				Height = MulliganGaugeHeight,
-				CornerRadius = new CornerRadius(MulliganGaugeHeight / 2.0),
-				HorizontalAlignment = HorizontalAlignment.Left,
-				Background = new SolidColorBrush(GaugeColor(t)),
-			};
-			track.Child = fill;
-			return track;
-		}
-
-		/// <summary>Red at the bottom of the window, amber at the class average, green at the top.</summary>
-		private static Color GaugeColor(double t)
-		{
-			var low = Color.FromRgb(0xf8, 0x2a, 0x1e);   // red
-			var mid = Color.FromRgb(0xf2, 0xc0, 0x2c);   // amber, i.e. an average keep
-			var high = Color.FromRgb(0x3f, 0xd0, 0x66);  // green
-			return t < 0.5
-				? Lerp(low, mid, t / 0.5)
-				: Lerp(mid, high, (t - 0.5) / 0.5);
-		}
-
-		private static Color Lerp(Color a, Color b, double t)
-			=> Color.FromRgb(
-				(byte)Math.Round(a.R + (b.R - a.R) * t),
-				(byte)Math.Round(a.G + (b.G - a.G) * t),
-				(byte)Math.Round(a.B + (b.B - a.B) * t));
 
 		/// <summary>
 		/// Render the redraft edit phase's deck panel: EVERY card in the deck, in the game's own
@@ -659,7 +589,13 @@ namespace HdtArenaHelper
 			}
 		}
 
-		private static FrameworkElement BuildLabel(string text, bool dimmed = false)
+		// Not pure green and red: on the mulligan's warm background a saturated pair vibrates and
+		// reads as an error state. These are lifted toward the pastel end so they stay legible over
+		// card art without shouting.
+		private static readonly Brush KeepBrush = new SolidColorBrush(Color.FromRgb(126, 217, 87));
+		private static readonly Brush TossBrush = new SolidColorBrush(Color.FromRgb(240, 106, 106));
+
+		private static FrameworkElement BuildLabel(string text, bool dimmed = false, Brush? colour = null)
 			=> new Border
 			{
 				Background = new SolidColorBrush(Color.FromArgb(200, 12, 12, 14)),
@@ -670,7 +606,7 @@ namespace HdtArenaHelper
 					Text = text,
 					FontSize = 15,
 					FontWeight = FontWeights.Bold,
-					Foreground = dimmed ? Brushes.Silver : Brushes.White,
+					Foreground = colour ?? (dimmed ? Brushes.Silver : Brushes.White),
 					TextAlignment = TextAlignment.Center
 				},
 				Opacity = dimmed ? 0.8 : 1.0,

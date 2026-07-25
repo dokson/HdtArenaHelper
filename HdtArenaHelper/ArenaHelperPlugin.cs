@@ -52,6 +52,8 @@ namespace HdtArenaHelper
 		// ghost-overlay bugs both came from one gate serving two screens.
 		private readonly CardChoiceWatcher _choiceWatcher = new CardChoiceWatcher();
 		private readonly MulliganWatcher _mulliganWatcher = new MulliganWatcher();
+		// Deck-relative mulligan advice. No data source behind it by design — see DeckMulliganAdvisor.
+		private readonly IMulliganAdvisor _mulliganAdvisor = new DeckMulliganAdvisor();
 		// Card map builds lazily on first use, so constructing at OnLoad (HearthDb may
 		// still be empty) is safe.
 		private readonly MetadataSynergyEngine _synergy = new MetadataSynergyEngine();
@@ -220,7 +222,6 @@ namespace HdtArenaHelper
 			try
 			{
 				var caches = new List<string> { Path.Combine(CacheDir, "hsreplay_arena.json") };
-				caches.AddRange(Directory.GetFiles(CacheDir, "firestone_*.json"));
 				var staleTime = DateTime.UtcNow - TimeSpan.FromDays(2);
 				foreach(var file in caches.Where(File.Exists))
 				{
@@ -312,16 +313,6 @@ namespace HdtArenaHelper
 		}
 
 		/// <summary>
-		/// The active blend of data sources. HSReplay and Firestone measure the SAME
-		/// quantity (drawn win-rate), so they are one consensus signal at a combined
-		/// weight of 1.0 (0.5 each), not two independent votes — otherwise adding the
-		/// second source would silently demote the heuristic from 1/3 to 1/5 of the
-		/// blend. Where both cover a card the consensus averages their sampling noise;
-		/// if either endpoint goes dark the survivor carries the win-rate signal (then
-		/// weighted evenly against the heuristic — the price of fixed weights). The
-		/// offline <see cref="HeuristicArenaDataSource"/> backstops cards neither covers.
-		/// </summary>
-		/// <summary>
 		/// Attach the synergy engine to an aggregator, WITH the data its dead-card lever needs: the
 		/// per-class tribe availability that decides whether a payoff with no members yet is really
 		/// dead. One helper for both call sites, so neither can wire the engine and forget its data.
@@ -333,12 +324,25 @@ namespace HdtArenaHelper
 				aggregator.Sources.OfType<IClassTribeAvailabilitySource>().FirstOrDefault());
 		}
 
+		/// <summary>
+		/// The active blend. The win-rate signal carries weight 1.0 against the offline heuristic's
+		/// 0.5 — a 2:1 ratio that is measured policy, not taste: the heuristic is a backstop and
+		/// REPORT.md argues its authority should if anything go down.
+		///
+		/// It used to be two sources of 0.5 each, because they measured the SAME quantity and had to
+		/// count as ONE consensus rather than two votes. The second feed was withdrawn in 0.1.5 at
+		/// its provider's request, so HSReplay carries that 1.0 alone. Note what
+		/// moved and what deliberately did NOT: the win-rate/heuristic ratio is unchanged, because
+		/// letting the heuristic rise to half the blend would be a scoring change smuggled in as a
+		/// dependency removal. What is genuinely lost is the consensus — nothing averages away a
+		/// sampling artefact now, and nothing cross-checks a poisoned payload.
+		/// </summary>
+
 		private static ScoreAggregator BuildAggregator()
 		{
 			var sources = new List<IArenaDataSource>
 			{
-				new HsReplayArenaDataSource(CacheDir, weight: 0.5),
-				new FirestoneArenaDataSource(CacheDir, weight: 0.5),
+				new HsReplayArenaDataSource(CacheDir, weight: 1.0),
 				new HeuristicArenaDataSource(weight: 0.5),
 			};
 			return new ScoreAggregator(sources);
@@ -729,18 +733,36 @@ namespace HdtArenaHelper
 			if(aggregator == null || _overlay == null)
 				return;
 
-			var stats = aggregator.Sources.OfType<IMulliganStatsSource>().FirstOrDefault();
-			var entries = new List<MulliganOverlayEntry>();
-			foreach(var dbfId in e.HandDbfIds)
+			// The advisor asks for a card's arena score rather than computing one: how good a card
+			// is has already been measured from win-rates, and duplicating that judgement here
+			// would be a second opinion nobody validated.
+			_mulliganAdvisor.SetScoreSource(dbfId =>
 			{
-				var dbCard = HearthDb.Cards.GetFromDbfId(dbfId);
-				var name = dbCard != null ? ResolveName(dbCard.Id) : dbfId.ToString();
-				entries.Add(new MulliganOverlayEntry(name, stats?.GetMulliganStats(e.DeckClass, dbfId)));
+				var blended = aggregator.Score(dbfId, e.DeckDbfIds, e.DeckClass);
+				// A low-confidence score is worse than none here: the advisor uses it to decide
+				// whether an expensive card is a bomb worth holding, and a thinly-sampled legendary
+				// scores mid-table for lack of games rather than for lack of power. Null makes the
+				// advisor abstain, which is the honest verdict on a card nobody has measured.
+				return blended.HasData && !blended.IsLowConfidence ? blended.Value : (double?)null;
+			});
+
+			var verdicts = _mulliganAdvisor.Evaluate(e.HandDbfIds, e.DeckDbfIds, e.DeckClass, e.OnCoin);
+			// The advisor answers all-or-nothing (verdicts are laid out by index), so a short list
+			// means it declined to speak about this hand at all.
+			if(verdicts.Count != e.HandDbfIds.Count)
+				return;
+
+			var entries = new List<MulliganOverlayEntry>();
+			for(var i = 0; i < e.HandDbfIds.Count; i++)
+			{
+				var dbCard = HearthDb.Cards.GetFromDbfId(e.HandDbfIds[i]);
+				var name = dbCard != null ? ResolveName(dbCard.Id) : e.HandDbfIds[i].ToString();
+				entries.Add(new MulliganOverlayEntry(name, verdicts[i]));
 			}
 
 			_overlay.SetMulligan(entries);
 			Log.Info($"[ArenaHelper] rendered mulligan: {entries.Count} cards, class={e.DeckClass}, " +
-				$"withStats={entries.Count(x => x.Stats != null)}");
+				$"coin={e.OnCoin}, calls={entries.Count(x => x.Verdict.Verdict != MulliganVerdict.Situational)}");
 		}
 
 		// Runs on the UI thread. Scores an in-game card choice (Discover) with the SAME engine the
@@ -753,13 +775,18 @@ namespace HdtArenaHelper
 				return;
 
 			var state = ReadGameState();
+			// Decided once for the whole choice, not per card: the mana line is worth showing only
+			// when it separates the options.
+			var manaSeparates = GameStateFacts.ManaSeparates(
+				e.OfferedDbfIds.Select(dbf => HearthDb.Cards.GetFromDbfId(dbf)), state);
+
 			var entries = new List<OverlayEntry>();
 			foreach(var dbfId in e.OfferedDbfIds)
 			{
 				var score = _aggregator.Score(dbfId, e.DeckDbfIds, e.DeckClass);
 				var dbCard = HearthDb.Cards.GetFromDbfId(dbfId);
 				var name = dbCard != null ? ResolveName(dbCard.Id) : dbfId.ToString();
-				var fact = GameStateFacts.Describe(dbCard, state);
+				var fact = GameStateFacts.Describe(dbCard, state, manaSeparates);
 				entries.Add(new OverlayEntry(name, score, cost: -1, note: fact));
 				Log.Info($"[ArenaHelper] choice {name} dbf={dbfId} " +
 					$"score={(score.HasData ? Math.Round(score.Value).ToString() : "-")} {DescribeScore(score)}" +

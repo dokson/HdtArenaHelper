@@ -22,10 +22,10 @@ hitting a free public endpoint again.
 
 ## What a run does
 
-1. Fetches HSReplay's free arena endpoint (via `curl` — Cloudflare 403s .NET's own TLS stack) plus
-   the 11 Firestone per-class CDN files, snapshotting both.
-2. Builds `(card, class)` rows from the class-centered **drawn** win-rate averaged over the two
-   sources, and cross-checks the hero-pick tier ranking of one source against the other.
+1. Fetches HSReplay's free arena endpoint (via `curl` — Cloudflare 403s .NET's own TLS stack) and
+   snapshots it. One request, one host.
+2. Builds `(card, class)` rows from the class-centered **drawn** win-rate. There is one measured
+   source, so nothing cross-checks the hero-pick tier ranking — read it accordingly.
 3. Drops redundant columns and the `kw_*`/`tx_*` indicators below the support floor, then selects
    the ridge penalty by cross-validation **grouped by card** — a neutral card contributes one row
    per class, so a random row split would leak.

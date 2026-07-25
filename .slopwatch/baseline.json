@@ -23,15 +23,6 @@
       "baselinedAt": "2026-07-24T12:51:40.3189329+00:00"
     },
     {
-      "hash": "f2a2137e64097dff",
-      "ruleId": "SW003",
-      "filePath": "HdtArenaHelper.Tests/FirestoneArenaDataSourceTests.cs",
-      "lineNumber": 23,
-      "codeSnippet": "catch { /* temp dir */ }",
-      "message": "Empty catch block swallows exceptions without handling",
-      "baselinedAt": "2026-07-24T12:51:40.3189543+00:00"
-    },
-    {
       "hash": "8c5188f13122ec12",
       "ruleId": "SW003",
       "filePath": "HdtArenaHelper.Tests/HsReplayArenaDataSourceTests.cs",

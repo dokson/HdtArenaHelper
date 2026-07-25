@@ -40,7 +40,9 @@ jobs:
           "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       # Live fetch: HSReplay via curl (Cloudflare 403s the .NET stack; runner IPs may
-      # still be blocked — the trainer fails loudly if so) + Firestone CDN.
+      # still be blocked — the trainer fails loudly if so). ONE request per week, to one
+      # host: this is the only automated traffic this project puts on someone else's
+      # infrastructure, and the second host it used to hit was removed on request.
       - name: Run trainer
         shell: pwsh
         run: dotnet run --project HdtArenaHelper.Training -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" | Tee-Object trainer.log

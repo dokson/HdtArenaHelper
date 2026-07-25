@@ -4,15 +4,20 @@ using HearthDb.Enums;
 namespace HdtArenaHelper
 {
 	/// <summary>
-	/// Collapses a card's REPRINTS onto one identity so the win-rate feeds can be joined: HSReplay
-	/// reports Illidari Studies as <c>CORE_YOP_001</c>, Firestone as <c>YOP_001</c>, and joining on the
-	/// raw dbf id left 216 cards with a single source — where the consensus is worth most.
+	/// Collapses a card's REPRINTS onto one identity, so a card whose printings are reported
+	/// separately (<c>CORE_YOP_001</c> and <c>YOP_001</c> are the same Illidari Studies) is scored
+	/// as one card rather than two thin ones.
 	///
-	/// Matched by NAME, measured: id normalisation recovered 210 of those 216 (printings follow no
-	/// single pattern — <c>CORE_EDR_004</c> vs <c>CORE_EDR_004_2026</c>), the name recovered all 216
-	/// with zero ambiguous groups. Guarded because a name is a weaker key: COLLECTIBLE cards only
-	/// (tokens reuse names and are never drafted), keyed with class and type. Anything unmapped keeps
-	/// its own id — failing to merge costs a consensus, a wrong merge pools two cards' win-rates.
+	/// Matched by NAME, measured: id normalisation caught 210 of 216 known cases — printings follow
+	/// no single pattern, <c>CORE_EDR_004</c> vs <c>CORE_EDR_004_2026</c> — while the name caught
+	/// all 216 with zero ambiguous groups. Guarded because a name is a weaker key: COLLECTIBLE cards
+	/// only (tokens reuse names and are never drafted), keyed with class and type. Anything unmapped
+	/// keeps its own id — failing to merge splits a sample, a wrong merge pools two cards' win-rates,
+	/// and only the second one is unrecoverable.
+	///
+	/// With one feed there is currently little for the join to do, and it is kept anyway: the cost
+	/// is a lazily built dictionary, and a feed that starts reporting printings separately would
+	/// otherwise silently halve those cards' samples.
 	/// </summary>
 	internal static class CardIdentity
 	{

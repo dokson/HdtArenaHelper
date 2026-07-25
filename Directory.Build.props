@@ -6,10 +6,16 @@
 
     IDE0005 only fires during build when the XML documentation file is generated, so we
     enable that and suppress CS1591 (missing doc comment) to avoid unrelated noise.
+
+    Warnings are ERRORS here, and that is the point: CI builds with -warnaserror, so a local
+    build without it is a different check wearing the same green tick. That gap shipped a
+    broken build once — a doc comment that documented one parameter out of three (CS1573)
+    passed locally and failed CI after the push. One setting, one verdict, everywhere.
   -->
   <PropertyGroup>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 </Project>

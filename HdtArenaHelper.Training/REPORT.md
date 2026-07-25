@@ -13,7 +13,6 @@
 ## Data
 - HSReplay `arena/card_stats/free` (ALL + 11 class buckets), dedup by `card_id` keeping max `num_games`.
 - HearthstoneJSON `latest/enUS/cards.json` (join on `id`).
-- Firestone/zerotoheroes per class: `winrate = decksWithCardThenWin / decksWithCard`.
 - Model artifact: `arena_weights.json`, produced by the `HdtArenaHelper.Training` C# tool.
 
 ## Central methodological finding
@@ -25,8 +24,14 @@ by class strength, not by card quality:
   buckets, `num_games >= 100`, GroupKFold by card to avoid leakage from neutrals).
 
 ## Noise ceiling
-Agreement between the two sources (HSReplay vs Firestone, same per-class target): mean Spearman
-**0.469** (per-row 0.533). No model on metadata alone can exceed this ceiling by much.
+The target itself is noisy — a card's measured arena win-rate over a few hundred games carries
+~3pp of standard error — so a model correlating with it is chasing a moving quantity. Measured
+against an independent estimate of the same per-class target, the ceiling sat at mean Spearman
+**0.469** (per-row 0.533): no model on metadata alone can exceed that by much, and a rho of ~0.26
+is therefore roughly 55% of what is achievable rather than a failure.
+
+Treat 0.469 as a fixed historical figure: it is a property of the data, but the pipeline no longer
+recomputes it, so it does not move with a refit.
 
 ## Comparison table — class-centered target, pooled n=2481, GroupKFold(5)
 | Heuristic | Spearman (test) | Top-decile P | Notes |
@@ -53,11 +58,6 @@ features/target noise, not the model class.
 
 Threshold sensitivity (H4 ridge OOF on ALL): >=100 → 0.271 (n=1158); >=500 → 0.253 (n=907);
 >=1000 → 0.220 (n=744). On the pooled target: >=50 → 0.261; >=100 → 0.263; >=200 → 0.219.
-
-## Cross-check Firestone
-- Final formula (trained on the mean target) evaluated OOF: rho 0.260 vs HSReplay, 0.201 vs
-  Firestone (P10 0.155). Version trained only on HSReplay: 0.299 vs Firestone pooled.
-- Holds on both sources: not overfit to HSReplay.
 
 ## Per-class vs ALL (deliverable 4)
 - PER-CLASS ridge models (OOF, num_games>=100): mean Spearman **0.184** — worse than the
@@ -334,35 +334,34 @@ The hero pick used to show only the pool-quality tier: the unweighted mean of a 
 per-card drawn rates, normalized 0-100. Useful for ranking, but not interpretable — "71/100" says
 nothing a player can check. A win-rate in percentage points does.
 
-Estimator, one per source, from payloads we already fetch:
+Estimator, from the payload we already fetch:
 
-- HSReplay: `Σ num_games·win_rate / Σ num_games` over the class bucket, using INCLUSION `win_rate`
+- `Σ num_games·win_rate / Σ num_games` over the class bucket, using INCLUSION `win_rate`
   (not the drawn rate the card scores use). Summing "games where the card was in the deck" x "their
   win-rate" counts every game once per card it contained, which is a deck-level rate.
-- Firestone: `Σ decksWithCardThenWin / Σ decksWithCard` over the class file.
 
-**Both need the same correction, and the bias is structural, not noise.** The pooled rate comes out
-at **53.37%** (HSReplay) and **55.56%** (Firestone) where a true average win-rate must be 50 — in
+**It needs a correction, and the bias is structural, not noise.** The pooled rate comes
+out at **53.37%** where a true average win-rate must be 50 — in
 arena a winning deck keeps playing (up to 12 wins) while a losing one stops at 3, so weighting by
-games oversamples winning decks. Subtracting each source's own pooled offset removes it; only the
+games oversamples winning decks. Subtracting the pooled offset removes it; only the
 offset, never the spread.
 
-Re-centred, the two independent sources agree within ~2pp with identical ordering, and land within
-~3pp of the figures HDT's paid helper displays for the three classes we could observe:
+Re-centred, the estimates land within ~3pp of the figures HDT's paid helper displays for the three
+classes we could observe — the only external check available:
 
-| class | HSReplay | Firestone | Arenasmith (observed) |
-|---|---|---|---|
-| Demon Hunter | 54.6 | 55.2 | — |
-| Paladin | 52.7 | 51.6 | **52** |
-| Hunter | 50.8 | 50.0 | — |
-| Mage | 49.5 | 49.0 | — |
-| Priest | 49.1 | 48.7 | — |
-| Death Knight | 45.0 | 47.0 | — |
-| Warlock | 44.1 | 44.4 | — |
-| Shaman | 41.9 | 41.0 | **39** |
-| Rogue | 39.1 | 40.2 | **36** |
-| Druid | 35.7 | 36.4 | — |
-| Warrior | 28.5 | 28.2 | — |
+| class | estimate | Arenasmith (observed) |
+|---|---|---|
+| Demon Hunter | 54.6 | — |
+| Paladin | 52.7 | **52** |
+| Hunter | 50.8 | — |
+| Mage | 49.5 | — |
+| Priest | 49.1 | — |
+| Death Knight | 45.0 | — |
+| Warlock | 44.1 | — |
+| Shaman | 41.9 | **39** |
+| Rogue | 39.1 | **36** |
+| Druid | 35.7 | — |
+| Warrior | 28.5 | — |
 
 **It is displayed, NOT blended into the score**, and that is a measured decision: Spearman between
 the pool-quality tier and this win-rate is **0.9636** — over 11 classes only Hunter (5th→3rd) and
@@ -370,7 +369,8 @@ Priest (3rd→5th) move at all. The proxy was already ranking the classes correc
 win-rate into the score would buy ~0.04 of correlation at the price of a hand-derived re-centring
 constant inside the scoring path. It earns its place as a label and nothing more.
 
-Not recoverable: the **pick rate** ("Picked 57%"). Neither source publishes selection frequency.
+Not recoverable: the **pick rate** ("Picked 57%"). The feed publishes inclusion, not selection
+frequency, so what fraction of players took a card when offered is not in the data.
 Do not attempt to infer it from `popularity`, which is inclusion-in-deck, a different quantity.
 
 ### 12. Tribe availability is per-CLASS, and the dead-card lever was ignoring it
@@ -429,7 +429,7 @@ returns null for `CardType.HERO`** instead. Fitting and inference are different 
 changed.
 
 **What it costs, measured** — of the **46** collectible hero CARDS in HearthDb, exactly **2** appear
-in either feed's cache: Galakrond, the Unbreakable and Lord Jaraxxus, both via Firestone. A feed only
+in the win-rate cache: Galakrond, the Unbreakable and Lord Jaraxxus. A feed only
 reports what actually gets drafted, so those two are also the ones in the pool: abstaining removes a
 number from **no card a player can currently be offered**. Frost Lich Jaina, the old golden, is
 covered by neither feed and is not in the pool.

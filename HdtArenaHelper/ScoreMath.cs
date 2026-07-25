@@ -6,8 +6,11 @@ using HearthDb.Enums;
 namespace HdtArenaHelper
 {
 	/// <summary>
-	/// The statistical policy shared by every win-rate data source (HSReplay, Firestone),
-	/// so their scores stay calibrated against each other in the blend:
+	/// The statistical policy shared by every win-rate data source, so their scores stay calibrated
+	/// against each other in the blend. Only HSReplay implements it since 0.1.5, but the policy
+	/// stays in one place rather than being inlined there: the reason it was extracted (two copies
+	/// had already drifted, one of them missing a range check) applies again the moment a second
+	/// source is added.
 	///
 	///   1. Shrinkage: empirical Bayes toward a target — thin samples glide to the prior,
 	///      big samples barely move — so no low-sample outlier can assert an extreme rate.
@@ -76,11 +79,10 @@ namespace HdtArenaHelper
 		/// The re-centring is not cosmetic, it removes a measured bias. Weighting cards by their
 		/// games is the only way to recover a deck-level rate from card-level data, but in arena a
 		/// winning deck keeps playing (up to 12 wins) while a losing one stops at 3, so games-
-		/// weighting oversamples winning decks. Measured on the live payloads, the pooled rate comes
-		/// out at 53.4% (HSReplay) and 55.6% (Firestone) where a true average win-rate must be ~50.
-		/// Subtracting each source's own pooled offset removes it, and the two then agree within
-		/// ~2pp with identical ordering — and land within ~3pp of the figures HDT's paid helper
-		/// shows for the same classes.
+		/// weighting oversamples winning decks. Measured on the live payload, the pooled rate comes
+		/// out at 53.4% where a true average win-rate must be ~50. Subtracting the source's own
+		/// pooled offset removes it, and the result lands within ~3pp of the figures HDT's paid
+		/// helper shows for the same classes — the one external check available.
 		///
 		/// So this is a CALIBRATED ESTIMATE, not a published number: label it as such wherever it
 		/// is shown. Only the offset is removed; the spread between classes is left untouched.
@@ -120,9 +122,9 @@ namespace HdtArenaHelper
 		///
 		/// Falls back to <paramref name="fallback"/> when the remainder is too thin to mean anything,
 		/// or when the arithmetic lands outside [0, 100] — which can happen from rounding on tiny
-		/// remainders and, since the feeds are untrusted input, from a poisoned rate. That guard used
-		/// to exist in the HSReplay path and NOT in Firestone's: the same policy implemented twice had
-		/// already drifted, which is precisely what this class exists to prevent.
+		/// remainders and, since a downloaded feed is untrusted input, from a poisoned rate. That
+		/// guard once existed in one source's copy of this policy and not in the other's: the same
+		/// rule implemented twice had already drifted, which is precisely what this class prevents.
 		/// </summary>
 		public static double LeaveOneOutTarget(double totalRate, int totalGames,
 			double subsetRate, int subsetGames, double fallback)

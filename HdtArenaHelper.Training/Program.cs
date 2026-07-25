@@ -16,7 +16,7 @@ namespace HdtArenaHelper.Training
 {
 	/// <summary>
 	/// Offline weight-fitting tool for the heuristic. Fetches real arena win-rates
-	/// (HSReplay + Firestone), builds a class-centered dual-source target from the DRAWN
+	/// (HSReplay), builds a class-centered target from the DRAWN
 	/// win-rate (win-rate of games where the card was actually drawn — the same, less
 	/// deck-strength-confounded metric the runtime sources score with), and fits the
 	/// same ridge model the plugin scores with — reusing <c>HeuristicArenaDataSource.
@@ -46,26 +46,24 @@ namespace HdtArenaHelper.Training
 				var pooled = TrainingRows.BuildHsReplayPooled(hs);
 				Console.WriteLine($"HSReplay pooled (card,class) rows: {pooled.Count}");
 
-				Console.WriteLine("fetching Firestone per-class stats...");
-				var (firestone, fsTiers) = TrainingRows.BuildFirestone();
-				Console.WriteLine($"Firestone (card,class) rows: {firestone.Count}");
-
-				// The hero-pick tier ranking is the highest-leverage output and is NOT
-				// covered by the per-card fit below: validate it leave-one-source-out on
-				// every retrain (each source's tier list built the way the runtime does).
-				TrainingRows.BacktestClassTiers(TrainingRows.HsReplayTiers(hs), fsTiers);
-
-				// Rows present in BOTH sources; dual-source averaged target.
-				var rows = new List<Row>();
-				foreach(var p in pooled)
-				{
-					if(firestone.TryGetValue((p.CardId, p.Class), out var fsWrC))
-						rows.Add(new Row(p.CardId, p.Class, (p.WrC + fsWrC) / 2.0, p.NumGames, p.WrC, fsWrC));
-				}
-				Console.WriteLine($"rows with both sources: {rows.Count}");
+				// SINGLE SOURCE since 0.1.5, when the second win-rate feed was withdrawn at its
+				// provider's request. Three things went with it, each worth naming rather than
+				// quietly dropping:
+				//   - the target was the AVERAGE of two independent measurements, so half of each
+				//     source's sampling noise cancelled. It is now one measurement;
+				//   - rows had to exist in BOTH feeds, which was an implicit quality filter. The
+				//     population is now every HSReplay row, so thin rows that used to be excluded by
+				//     the intersection are in the fit — the shrinkage and the sample-size weighting
+				//     are what stands between them and the weights;
+				//   - the leave-one-source-out backtest of the class tier list is gone outright.
+				//     Nothing cross-checks the hero-pick ranking now.
+				var rows = pooled
+					.Select(p => new Row(p.CardId, p.Class, p.WrC, p.NumGames, p.WrC))
+					.ToList();
+				Console.WriteLine($"rows: {rows.Count} (single source)");
 				if(rows.Count < 100)
 				{
-					Console.Error.WriteLine("too few dual-source rows; aborting.");
+					Console.Error.WriteLine("too few rows; aborting.");
 					return 1;
 				}
 

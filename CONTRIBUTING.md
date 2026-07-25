@@ -42,13 +42,14 @@ Bypass a single commit with `git commit --no-verify` if needed.
 
 ## Data & ethics
 
-The plugin uses only data it is **entitled to use** — currently the HSReplay and Firestone
-public arena endpoints, plus the card metadata already shipped with HDT. "Publicly reachable"
-is **not** the same as licensed, and this project has been told so by a provider: absent a
-stated licence the default is no permission, so **ask before adding a source** and record the
-answer. If a provider asks us to stop, we stop — which is why every source must stay
-individually droppable. Do **not** add code that scrapes a paywalled service or
-bundles/redistributes anyone's data. Network code must cache and fail soft; note that for
+The plugin uses only data it is **entitled to use** — currently the HSReplay public arena
+endpoint, plus the card metadata already shipped with HDT. "Publicly reachable" is **not** the
+same as licensed, and this project has learned that the expensive way: a provider asked us to
+stop using its feed and the source was removed the same day, costing a second opinion on every
+card. So: absent a stated licence the default is no permission, **ask before adding a source**
+and record the answer, and keep every source individually droppable with the offline model as
+the backstop. Do **not** add code that scrapes a paywalled service or bundles/redistributes
+anyone's data. Network code must cache and fail soft; note that for
 hsreplay.net a browser User-Agent alone is NOT enough (Cloudflare fingerprints the TLS stack)
 — the runtime shells out to `curl`. Full policy: [AGENTS.md](./AGENTS.md#data-sources--ethics).
 

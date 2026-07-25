@@ -37,7 +37,7 @@ namespace HdtArenaHelper.Training
 				["anchor_median_raw"] = anchor,
 				["anchor_sigma_raw"] = sigma,
 				["weights"] = JObject.FromObject(weights),
-				["target"] = "avg(HSReplay, Firestone) class-centered arena drawn winrate (pct pts)",
+				["target"] = "HSReplay class-centered arena drawn winrate (pct pts)",
 				// The provenance must state how this file was ACTUALLY fit. It used to hardcode
 				// "alpha=10, sqrt(games) weights", which stopped being true the moment alpha became
 				// cross-validated and the weights normalized — leaving the shipped model lying about

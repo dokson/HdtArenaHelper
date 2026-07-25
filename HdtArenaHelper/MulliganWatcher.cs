@@ -12,13 +12,24 @@ namespace HdtArenaHelper
 	{
 		/// <summary>The offered cards, in the client's own zone order (left to right).</summary>
 		public IReadOnlyList<int> HandDbfIds { get; }
-		/// <summary>The run deck's class, so the keep stats come from that class's games.</summary>
+		/// <summary>The run deck's class.</summary>
 		public HearthDb.Enums.CardClass DeckClass { get; }
+		/// <summary>The run deck: the advisor judges the hand AGAINST it, so it is not optional.</summary>
+		public IReadOnlyList<int> DeckDbfIds { get; }
+		/// <summary>
+		/// Second player. Read from the hand SIZE rather than from the client: Hearthstone deals 3
+		/// cards going first and 4 going second, and the Coin itself is not in hand yet at the
+		/// mulligan. A rule beats a field read that could fail.
+		/// </summary>
+		public bool OnCoin { get; }
 
-		public MulliganEventArgs(IReadOnlyList<int> handDbfIds, HearthDb.Enums.CardClass deckClass)
+		public MulliganEventArgs(IReadOnlyList<int> handDbfIds, HearthDb.Enums.CardClass deckClass,
+			IReadOnlyList<int> deckDbfIds, bool onCoin)
 		{
 			HandDbfIds = handDbfIds;
 			DeckClass = deckClass;
+			DeckDbfIds = deckDbfIds;
+			OnCoin = onCoin;
 		}
 	}
 
@@ -59,7 +70,7 @@ namespace HdtArenaHelper
 			var arenaInfo = Reflection.Client.GetArenaDeck();
 
 			var plan = BuildMulliganPlan(state?.MulliganCards, arenaInfo?.Deck?.Hero,
-				arenaInfo?.Deck?.HeroPower);
+				arenaInfo?.Deck?.HeroPower, arenaInfo?.Deck?.Cards);
 			if(plan == null)
 			{
 				Clear();
@@ -71,7 +82,8 @@ namespace HdtArenaHelper
 			_lastSignature = plan.Signature;
 			_showing = true;
 
-			Log($"mulligan: {plan.Args.HandDbfIds.Count} cards, class={plan.Args.DeckClass}");
+			Log($"mulligan: {plan.Args.HandDbfIds.Count} cards, class={plan.Args.DeckClass}, " +
+				$"deck={plan.Args.DeckDbfIds.Count}, coin={plan.Args.OnCoin}");
 			OnMulligan?.Invoke(this, plan.Args);
 		}
 
@@ -95,7 +107,7 @@ namespace HdtArenaHelper
 		/// instead of freezing a half-built hand.
 		/// </summary>
 		internal static MulliganPlan? BuildMulliganPlan(IEnumerable<MulliganState.MulliganCard>? cards,
-			string? hero, string? heroPower)
+			string? hero, string? heroPower, IEnumerable<Card>? deckCards)
 		{
 			if(cards == null)
 				return null;
@@ -116,7 +128,20 @@ namespace HdtArenaHelper
 			if(deckClass == HearthDb.Enums.CardClass.INVALID)
 				return null;
 
-			return new MulliganPlan(new MulliganEventArgs(hand, deckClass),
+			// The deck is what the advice is made of, so no deck means no advice — the same "show
+			// nothing rather than something generic" rule the class check above applies.
+			var deck = (deckCards ?? Enumerable.Empty<Card>())
+				.SelectMany(c => Enumerable.Repeat(DraftWatcher.ToDbfId(c.Id), Math.Max(1, c.Count)))
+				.Where(dbf => dbf != 0)
+				.ToList();
+			if(deck.Count == 0)
+				return null;
+
+			// 3 cards going first, 4 going second. The Coin is not dealt into the mulligan hand, so
+			// the count is the only thing that says which side of the turn order this is.
+			var onCoin = hand.Count >= 4;
+
+			return new MulliganPlan(new MulliganEventArgs(hand, deckClass, deck, onCoin),
 				string.Join(",", hand));
 		}
 

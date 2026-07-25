@@ -5,6 +5,48 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-26
+
+### Build
+
+- Warnings are errors for every build, not only in CI. The workflow already passed `-warnaserror`
+  while a local `dotnet build` did not, so the two produced the same green tick for different
+  checks — and a doc comment that documented one parameter out of three passed here and broke
+  there, after the push. The setting now lives in `Directory.Build.props`, where both read it.
+
+### Removed
+
+- **Firestone is no longer a data source**, at the request of its author
+  ([#8](https://github.com/dokson/HdtArenaHelper/issues/8)). The runtime feed, the training input
+  and the cached files are all gone. This is the project's stated policy meeting its first real
+  test — "publicly reachable is not licensed, and if a provider says stop, stop" — and it cost
+  something: scores now rest on **one** win-rate source, so nothing averages away a sampling
+  artefact and nothing cross-checks a poisoned payload. That is a real limitation and it is written
+  down rather than glossed over. The win-rate signal keeps weight 1.0 against the offline model's
+  0.5: letting the model rise to half the blend would have been a scoring change smuggled in as a
+  dependency removal.
+- The heuristic weights were **re-fit from HSReplay alone** and adopted, so the release ships no
+  model derived from the withdrawn data. Every card's score moves a little as a result; the fit
+  runs on more rows (2438 vs 1868 — the old intersection of two feeds was an implicit filter) with
+  a different regularization strength.
+
+### Changed
+
+- **The mulligan screen was rebuilt as our own advice: tempo × quality, judged against your deck.**
+  The previous version showed keep win-rates from the withdrawn feed. Rather than drop the screen,
+  it now answers a different question with things the plugin owns outright — the 30 cards you
+  drafted, the card's own arena score, and the rules of the game. What a card does on turns 1-2
+  decides the verdict; the score decides whether that turn is worth buying; the deck decides the
+  exceptions (a second 2-drop is a spare when the deck holds five more). Each call names its
+  reason: *"plays on turn 2"*, *"needs a board you do not have on turn 1"*, *"one health — a hero
+  power removes it for free"*, *"the Coin turns its Combo on"*, *"nothing plays it before turn 6"*.
+  There is deliberately **no percentage** — an invented keep-rate is exactly the kind of number
+  this project measured to be worse than nothing — and three situations produce silence rather
+  than a verdict: a card with no score, a card whose score is low-confidence (a thinly-sampled
+  legendary looks average for want of games, not power), and anything whose printed cost is not
+  its real cost. Most cards get no call at all, which is the honest answer and keeps the one that
+  matters visible.
+
 ## [0.1.4] - 2026-07-25
 
 ### Changed
@@ -327,6 +369,7 @@ First release.
 - The synergy engine is designed but not yet implemented (a `NullSynergyEngine`
   placeholder is wired in).
 
+[0.1.5]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.1...v0.1.2

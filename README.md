@@ -8,7 +8,6 @@
 [![Hearthstone Deck Tracker](https://img.shields.io/badge/plugin%20for-Hearthstone%20Deck%20Tracker-2c7ce6)](https://hsdecktracker.net/)
 
 [![data: HSReplay](https://img.shields.io/badge/data-HSReplay-1d9bf0)](https://hsreplay.net/)
-[![data: Firestone](https://img.shields.io/badge/data-Firestone-e8873a)](https://www.firestoneapp.com/)
 
 **A free, open-source Hearthstone Arena draft helper — a plugin for
 [Hearthstone Deck Tracker](https://hsdecktracker.net/) (HDT).**
@@ -44,12 +43,15 @@ space is either a browser tab you alt-tab to mid-draft, or another subscription.
 does that job **in the client, in real time, for free and forever**, from data anyone can
 fetch.
 
-**Free alternative, not a clone.** The scoring is ours, and deliberately not single-sourced.
-HSReplay is the natural arena data provider — it is also made by the same team as the tracker,
-so a helper built on it alone inherits one provider's view of the format. This plugin blends
-**two independent free win-rate sources** (HSReplay and Firestone) as one consensus signal, so
-no single provider decides the number, and if either goes dark the other keeps the score alive.
-Adding further public sources is an explicit goal, not an afterthought.
+**Free alternative, not a clone.** The scoring is ours: a published win-rate is the input, what
+the plugin shows is computed here — class context, sample-size weighting, deck synergy, and an
+offline model for what the data has not seen.
+
+Until 0.1.5 a second win-rate feed voted alongside HSReplay, and its author asked us to stop
+using it — so we did, the same day. That leaves one measured source, which is a real limitation
+and is stated as one: nothing averages away a sampling artefact now. A second source is wanted,
+but real arena win-rates are first-party by nature — whoever has them has them because players
+upload games — so it is a conversation to have rather than an endpoint to find.
 
 **Built for the player who does not follow the meta.** You should not need to have read a tier
 list or memorised the current pool to draft reasonably — nor to know which tribe a class is
@@ -73,8 +75,7 @@ free, transparent, and honest about its limits.
 - **Live draft detection** — reads the three offered cards (and, in Underground Arena, the
   legendary + package groups) as you draft, via HDT's HearthMirror path.
 - **One blended score per card**, 0–100, with a per-source breakdown available:
-  - Real arena win-rates from HSReplay's free public arena endpoint AND Firestone's
-    public per-class CDN, blended at equal weight.
+  - Real arena win-rates from HSReplay's free public arena endpoint.
   - Scored **in your class's context** once the hero is picked (per-class data, falling
     back to the global rate where the class sample is thin).
   - An offline metadata heuristic as a fallback, with weights fit by ridge regression
@@ -95,9 +96,14 @@ free, transparent, and honest about its limits.
   cannot cast this turn, a minion with no room, and — first, because it is the only irreversible
   one — a full hand, where the discovered card is destroyed outright. Facts in words, never
   points quietly added to the score.
-- **Mulligan guidance** — per card, how often your class keeps it and how those games went, from
-  counters already inside the data the plugin downloads anyway (so: zero extra requests). Thin
-  samples show a dash rather than a confident-looking number.
+- **Mulligan guidance: tempo × quality, judged against YOUR deck.** What a card does on turns 1-2
+  decides the call; how good it actually is decides whether that turn is worth buying. Every
+  verdict names the reason: *"plays on turn 2"*, *"a second 2-drop, and the deck holds more"*,
+  *"needs a board you do not have on turn 1"*, *"one health — a hero power removes it for free"*,
+  *"the Coin turns its Combo on"*, *"nothing plays it before turn 6"*. Most cards get no call at
+  all, which is the honest answer and keeps the one that matters visible — and a card nobody has
+  enough games on gets silence rather than a guess, because a thinly-measured legendary looks
+  average for want of data, not for want of power.
 - **Stays out of your other games** — the in-game overlay appears only in an actual Arena match,
   so Battlegrounds, ranked and brawls are untouched.
 - **Self-updating** — checks this repo's public releases once a day and stages the new build for
@@ -146,8 +152,8 @@ Yes, and the mode-specific screens too: the legendary-group first pick is scored
 after a loss the redraft shows your whole deck as a scored list so the cards to cut stand out.
 
 **Does this need a paid subscription (Arenasmith, HSReplay Premium, etc.)?**
-No — that is the point of the project. Scoring comes from HSReplay's and Firestone's free public
-arena data plus an offline heuristic. Nothing paywalled is used, required, or scraped.
+No — that is the point of the project. Scoring comes from HSReplay's free public arena data plus
+an offline heuristic. Nothing paywalled is used, required, or scraped.
 
 **Does it replace HDT's native Arenasmith overlay?**
 It suppresses HDT's native overlay while active so the two don't stack, and restores your
@@ -189,16 +195,29 @@ one exception is a card that is structurally dead in your deck, which may reorde
 
 ## Roadmap
 
-What shipped is in the [changelog](./CHANGELOG.md). The **0.1.3** goal — the helper following you
-out of the draft and into the game — is done: in-game Discover scoring, mulligan guidance, and
-board awareness stated rather than scored all landed. What is open now:
+What shipped is in the [changelog](./CHANGELOG.md). The helper now follows you out of the draft
+and into the game — Discover scoring, deck-relative mulligan advice, and board facts stated rather
+than scored. What is open now:
 
 - [ ] **Judgement calls that go beyond the rules** ("I am behind, I want removal"). Bounded and
       experimental if it ever lands — there is no public per-game dataset to fit it against, and
       this project's own measurements say an unvalidated number is worse than no number.
-- [ ] **A third win-rate source.** Two feeds already outvote each other usefully; a third would
-      make the consensus survive one going dark. Gated on *asking* the provider first — see
-      [Data sources](#data-sources--credits).
+- [ ] **The opponent's class at the mulligan.** Some calls genuinely depend on it — a one-health
+      body is free removal for a pinging hero power and fine against the classes without one — and
+      the client knows the matchup before you keep a card.
+- [ ] **Your run, scored as a whole** — the average score of the deck you have drafted, and the same
+      for your opponent's deck reconstructed from the cards they actually play. It is the one number
+      that says how the *run* is going rather than what to pick next, and everything it needs is
+      already on this machine.
+- [ ] **A mechanics summary of your deck** — drop curve, removal, AoE, card draw. The synergy engine
+      already computes most of this to decide its bonus and then throws it away; showing it costs no
+      new data at all.
+- [ ] **Your own numbers** — win-rate by class, by hero and by period, from the game history HDT
+      already keeps locally. Nobody else's data, nobody's permission required.
+- [ ] **A second win-rate source, if one can be had honourably.** Consensus survives one provider
+      going dark; a single feed does not. But real arena win-rates are first-party by nature — whoever
+      has them has them because players upload games — so this is a conversation to have, not an
+      endpoint to find. See [Data sources](#data-sources--credits).
 - [ ] **Sharper thin-sample handling.** Cards nobody has enough games on are the weakest part of
       the score, and the honest fixes are statistical, not cosmetic
       ([REPORT.md](./HdtArenaHelper.Training/REPORT.md) tracks them).
@@ -221,11 +240,16 @@ vulnerability.
 | Source | What it provides |
 |---|---|
 | [HSReplay](https://hsreplay.net/) arena API | Real arena win-rate / popularity per card and class (free, public) |
-| [Firestone](https://www.firestoneapp.com/) public arena CDN | Real arena win-rate per class: second runtime win-rate source + offline weight fitting |
 
-Both feeds are scoped to **Underground Arena** and to recent games (HSReplay reports a 4-day
-window, Firestone the current patch). So no pre-patch games dilute a score — and if you play normal
-Arena, the numbers still come from Underground games, which is a real caveat rather than a detail.
+The feed is scoped to **Underground Arena** and to recent games (a 4-day window, stated in the
+payload itself). So no pre-patch games dilute a score — and if you play normal Arena, the numbers
+still come from Underground games, which is a real caveat rather than a detail.
+
+**A source is used only with permission, and dropped the moment it is withdrawn.** Publicly
+reachable is not the same as licensed: absent a stated licence the default is no permission, so a
+provider gets asked before being added and believed when it says stop. That has already happened
+once, and the source was removed the same day — which is also why every source has to stay
+individually droppable, with the offline model as the backstop.
 
 ## License
 
@@ -234,4 +258,4 @@ Arena, the numbers still come from Underground games, which is a real caveat rat
 ---
 
 *Fan project. Hearthstone is a trademark of Blizzard Entertainment, Inc. Not affiliated
-with or endorsed by Blizzard, HearthSim, HSReplay, Firestone, or any data provider.*
+with or endorsed by Blizzard, HearthSim, HSReplay, or any data provider.*

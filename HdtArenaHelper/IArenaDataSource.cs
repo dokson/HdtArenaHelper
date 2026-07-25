@@ -5,7 +5,7 @@ using HearthDb.Enums;
 namespace HdtArenaHelper
 {
 	/// <summary>
-	/// A pluggable provider of arena card ratings (e.g. HSReplay, Firestone).
+	/// A pluggable provider of arena card ratings (today: HSReplay, plus the offline heuristic).
 	///
 	/// Each source is responsible for loading its own data and exposing a
 	/// <b>normalized 0-100 score</b> per card so that heterogeneous metrics
@@ -70,10 +70,15 @@ namespace HdtArenaHelper
 	/// One card's mulligan record for a class: how often it is KEPT when offered, and the win-rate of
 	/// the games where it survived the mulligan.
 	///
-	/// <b>Not causal, and single-source.</b> A card is kept in hands that already look good, so a
-	/// high keep win-rate is partly the hand's quality and not the card's — and only Firestone
-	/// publishes these counters, so there is no second opinion to average against. Both facts must
-	/// reach the screen as presentation ("est.", the sample size), never be smoothed away.
+	/// <b>Not causal.</b> A card is kept in hands that already look good, so a high keep win-rate is
+	/// partly the hand's quality and not the card's. That has to reach the screen as presentation
+	/// ("est.", the sample size), never be smoothed away.
+	///
+	/// <b>Nothing implements this today</b>, and the mulligan screen is served by
+	/// <see cref="IMulliganAdvisor"/> instead — deck-relative judgement rather than measured keep
+	/// rates. The contract is kept because the two are complementary, and it states the bar any
+	/// implementation has to clear: carry a sample size, drop what is below a floor rather than
+	/// guess at it, and pool a card's reprints.
 	/// </summary>
 	public readonly struct MulliganCardStats
 	{

@@ -182,33 +182,21 @@ namespace HdtArenaHelper.Training
 			if(!double.IsNaN(thinRho) && !double.IsNaN(baseline))
 				Console.WriteLine($"  -> covariate-shift gap vs baseline: {thinRho - baseline:+0.0000;-0.0000}");
 
-			// Is that gap a MODEL failure or an unreliable LABEL? A thin card's measured rate is
-			// itself noisy (a few hundred games is ~3pp of standard error), and correlating
-			// against a noisy truth attenuates rho regardless of how good the model is. The two
-			// win-rate feeds are independent measurements of the same quantity, so their
-			// agreement estimates the target's reliability. Disattenuating by sqrt(reliability)
-			// separates the two explanations — without this the headline number is unreadable.
+			// LOST IN 0.1.5, and worth stating rather than quietly dropping. Is the thin-decile gap
+			// a MODEL failure or an unreliable LABEL? A thin card's measured rate is itself noisy
+			// (a few hundred games is ~3pp of standard error), and correlating against a noisy truth
+			// attenuates rho however good the model is. Two independent feeds measuring the same
+			// quantity let their agreement estimate the target's reliability, and disattenuating by
+			// sqrt(reliability) separated the two explanations. With one feed there is no second
+			// measurement, so the reliability of the label is no longer estimable at all: the thin
+			// numbers below can no longer be told apart from a noisy target, and must be read as an
+			// upper bound on how bad the model is, not as a measurement of it. Restoring this is one
+			// of the concrete things a second (welcome) source would buy back.
+
 			var thinRows = new List<int>();
 			var thickRows = new List<int>();
 			for(var i = 0; i < rows.Count; i++)
 				(thinnest.Contains(rows[i].CardId) ? thinRows : thickRows).Add(i);
-
-			var thinRel = Stats.Spearman(
-				thinRows.Select(i => rows[i].WrHs).ToArray(),
-				thinRows.Select(i => rows[i].WrFs).ToArray());
-			var thickRel = Stats.Spearman(
-				thickRows.Select(i => rows[i].WrHs).ToArray(),
-				thickRows.Select(i => rows[i].WrFs).ToArray());
-			Console.WriteLine($"  target reliability (HSReplay vs Firestone agreement):");
-			Console.WriteLine($"      thin decile rho={thinRel:0.0000}   rest rho={thickRel:0.0000}");
-			if(thinRel > 0 && thickRel > 0 && !double.IsNaN(thinRho) && !double.IsNaN(baseline))
-			{
-				// Ceiling: a model cannot correlate with truth better than the label does.
-				Console.WriteLine($"      disattenuated: thin {thinRho / Math.Sqrt(thinRel),7:0.0000}" +
-					$"   baseline {baseline / Math.Sqrt(thickRel),7:0.0000}");
-				Console.WriteLine("      (if the thin gap survives disattenuation it is a real model" +
-					" failure; if it closes, the label is the problem and the fix is a better target)");
-			}
 
 			// Third explanation to rule out: RANGE RESTRICTION. Rank correlation collapses when
 			// the held-out group's true spread is narrow, even with a perfect model — and thin

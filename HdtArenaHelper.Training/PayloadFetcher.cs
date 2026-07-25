@@ -56,7 +56,7 @@ namespace HdtArenaHelper.Training
 		{
 			// .NET's TLS/HTTP fingerprint gets 403'd by Cloudflare on hsreplay.net, while
 			// curl (bundled with Windows 10+/Git) is allowed. Shell out to it for this
-			// dev-only fetch; --compressed handles Firestone's gzipped payloads.
+			// dev-only fetch; --compressed keeps a gzipped payload small on the wire.
 			var psi = new ProcessStartInfo("curl", $"-fsSL --compressed -A \"{TrainingConfig.UserAgent}\" \"{url}\"")
 			{
 				RedirectStandardOutput = true,

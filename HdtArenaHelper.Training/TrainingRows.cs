@@ -25,21 +25,25 @@ namespace HdtArenaHelper.Training
 		public readonly CardClass Class;
 		public readonly double YAvg;
 		public readonly int NumGames;
-		// The two sources kept separately as well as averaged: their agreement on a subset is
-		// the only available estimate of how RELIABLE the target is there, which is what tells
-		// a genuine model failure apart from attenuation by a noisy label.
+		// Kept separate from YAvg even though the two are now the same number: YAvg is "the target
+		// the fit consumes" and WrHs is "what HSReplay reported". They coincided before too — YAvg
+		// was the average of two feeds — and collapsing them would erase the distinction exactly
+		// when a second source returns.
 		public readonly double WrHs;
-		public readonly double WrFs;
-		public Row(string cardId, CardClass cls, double yAvg, int numGames, double wrHs, double wrFs)
+		public Row(string cardId, CardClass cls, double yAvg, int numGames, double wrHs)
 		{
 			CardId = cardId; Class = cls; YAvg = yAvg; NumGames = numGames;
-			WrHs = wrHs; WrFs = wrFs;
+			WrHs = wrHs;
 		}
 	}
 
 	/// <summary>
-	/// Turns the two public win-rate feeds into the (card, class) rows the fit consumes, and
-	/// cross-checks the hero-pick tier ranking of one source against the other.
+	/// Turns the public win-rate feed into the (card, class) rows the fit consumes.
+	///
+	/// It used to take TWO feeds and cross-check the hero-pick tier ranking of one against the
+	/// other — a leave-one-source-out gate that failed loudly when they disagreed. The second feed
+	/// was withdrawn in 0.1.5 at its provider's request, so nothing validates the tier ranking now.
+	/// Do not mistake the silence for agreement.
 	/// </summary>
 	internal static class TrainingRows
 	{
@@ -79,49 +83,6 @@ namespace HdtArenaHelper.Training
 			return result;
 		}
 
-		// ---- Firestone: class-centered drawn winrate (fraction -> pct points) --
-
-		internal static (Dictionary<(string, CardClass), double> Centered, Dictionary<CardClass, double> Tiers)
-			BuildFirestone()
-		{
-			var tiers = new Dictionary<CardClass, double>();
-			var result = new Dictionary<(string, CardClass), double>();
-			foreach(CardClass cls in Enum.GetValues(typeof(CardClass)))
-			{
-				var name = cls.ToString().ToLowerInvariant();
-				string json;
-				try { json = PayloadFetcher.Download(string.Format(TrainingConfig.FirestoneUrlFmt, name)); }
-				catch { continue; } // class file may not exist
-				JArray? stats;
-				try { stats = (JArray?)JObject.Parse(json)["stats"]; }
-				catch { continue; }
-				if(stats == null)
-					continue;
-
-				var entries = new List<(string card, double wr, int drawn)>();
-				foreach(var e in stats)
-				{
-					var cardId = (string?)e["cardId"];
-					var s = e["stats"];
-					var drawn = (int?)s?["drawn"] ?? 0;
-					var wins = (int?)s?["drawnThenWin"] ?? 0;
-					if(string.IsNullOrEmpty(cardId) || drawn < TrainingConfig.MinGames)
-						continue;
-					entries.Add((cardId!, wins / (double)drawn, drawn));
-				}
-				if(entries.Count < TrainingConfig.MinClassRows)
-					continue;
-
-				var totalDrawn = entries.Sum(t => (double)t.drawn);
-				var mean = entries.Sum(t => t.wr * t.drawn) / totalDrawn; // draws-weighted
-				foreach(var t in entries)
-					result[(t.card, cls)] = (t.wr - mean) * 100.0; // to pct points, like HSReplay
-				// Tier the way the runtime does: UNWEIGHTED mean of the class's card rates.
-				tiers[cls] = entries.Average(t => t.wr) * 100.0;
-			}
-			return (result, tiers);
-		}
-
 		/// <summary>Class tiers from the HSReplay buckets, mirroring the runtime
 		/// (unweighted mean of the class's card drawn win-rates, games floor applied).</summary>
 		internal static Dictionary<CardClass, double> HsReplayTiers(JObject hs)
@@ -148,46 +109,5 @@ namespace HdtArenaHelper.Training
 			return tiers;
 		}
 
-		/// <summary>
-		/// Leave-one-source-out check of the hero-pick tier RANKING: if the two sources
-		/// don't rank the classes the same way, the tier list shown at the hero pick is
-		/// not trustworthy for that patch — investigate before shipping a retrain.
-		/// </summary>
-		internal static void BacktestClassTiers(
-			Dictionary<CardClass, double> hsTiers, Dictionary<CardClass, double> fsTiers)
-		{
-			var common = hsTiers.Keys.Where(fsTiers.ContainsKey).ToList();
-			if(common.Count < 6)
-			{
-				Console.WriteLine($"class-tier backtest skipped ({common.Count} common classes).");
-				return;
-			}
-
-			var hsRank = Ranks(common, hsTiers);
-			var fsRank = Ranks(common, fsTiers);
-			double d2 = 0;
-			foreach(var cls in common)
-				d2 += Math.Pow(hsRank[cls] - fsRank[cls], 2);
-			var n = common.Count;
-			var rho = 1.0 - 6.0 * d2 / (n * ((double)n * n - 1));
-
-			Console.WriteLine();
-			Console.WriteLine($"class-tier ranking cross-source agreement (n={n}): Spearman={rho:0.00}");
-			Console.WriteLine($"  HSReplay:  {string.Join(" > ", common.OrderByDescending(c => hsTiers[c]))}");
-			Console.WriteLine($"  Firestone: {string.Join(" > ", common.OrderByDescending(c => fsTiers[c]))}");
-			Console.WriteLine(rho >= 0.7
-				? "  TIER GATE PASS: the sources agree on the hero-pick ranking."
-				: "  TIER GATE WARNING: sources disagree — review the tier list before trusting the hero pick.");
-		}
-
-		internal static Dictionary<CardClass, int> Ranks(
-			IReadOnlyList<CardClass> classes, Dictionary<CardClass, double> tiers)
-		{
-			var ordered = classes.OrderByDescending(c => tiers[c]).ToList();
-			var ranks = new Dictionary<CardClass, int>();
-			for(var i = 0; i < ordered.Count; i++)
-				ranks[ordered[i]] = i;
-			return ranks;
-		}
 	}
 }

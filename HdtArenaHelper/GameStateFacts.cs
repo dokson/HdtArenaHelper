@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HearthDb.Enums;
 using HearthDb;
 
@@ -51,7 +52,16 @@ namespace HdtArenaHelper
 		/// has nothing to add. One line, because the overlay has one line and three simultaneous
 		/// warnings would bury the one that matters.
 		/// </summary>
-		internal static string? Describe(Card? card, GameStateSnapshot state)
+		/// <param name="card">The offered card, or null when it did not resolve.</param>
+		/// <param name="state">The board snapshot; an invalid one makes every rule silent.</param>
+		/// <param name="manaSeparatesOptions">
+		/// Whether the mana check tells the offered cards APART. Seen live: three options costing 2
+		/// with 0 mana left each carried "needs 2 mana, you have 0" — true on all three, therefore
+		/// useless on all three, and three identical warnings bury the fact that does discriminate.
+		/// The rule earns its line only when one option is castable now and another is not.
+		/// </param>
+		internal static string? Describe(Card? card, GameStateSnapshot state,
+			bool manaSeparatesOptions = true)
 		{
 			if(card == null || !state.IsValid)
 				return null;
@@ -66,10 +76,32 @@ namespace HdtArenaHelper
 			if(card.Type == CardType.MINION && state.FriendlyMinions >= maxBoard)
 				return "board full — no room for a minion";
 
-			if(card.Cost > state.AvailableMana)
+			if(manaSeparatesOptions && card.Cost > state.AvailableMana)
 				return $"needs {card.Cost} mana, you have {state.AvailableMana}";
 
 			return null;
+		}
+
+		/// <summary>
+		/// Does the mana check separate these options, i.e. is at least one castable now and at
+		/// least one not? When they all sit on the same side of the line it says nothing about the
+		/// choice, only about the turn — which the player can already see.
+		/// </summary>
+		internal static bool ManaSeparates(IEnumerable<Card?> offered, GameStateSnapshot state)
+		{
+			if(!state.IsValid)
+				return false;
+			var castable = 0;
+			var total = 0;
+			foreach(var card in offered)
+			{
+				if(card == null)
+					continue;
+				total++;
+				if(card.Cost <= state.AvailableMana)
+					castable++;
+			}
+			return castable > 0 && castable < total;
 		}
 	}
 }

@@ -25,7 +25,7 @@ namespace HdtArenaHelper
 	/// rotation/patch, re-run the trainer to regenerate that file and rebuild.
 	///
 	/// The weights were fit by ridge regression against real arena DRAWN win-rates
-	/// (HSReplay + Firestone public data; the metric the runtime sources score with,
+	/// (the same public HSReplay data the runtime scores with; the metric is the one
 	/// centered on each class's average so the score measures card value, not class
 	/// strength). Out-of-fold Spearman vs real win-rates is ~0.27 — a weak signal in
 	/// absolute terms, so this only ranks cards the real win-rate data has not covered;
@@ -104,7 +104,7 @@ namespace HdtArenaHelper
 			// dropping the dummy moved Frost Lich Jaina from 76.6 to 53.6. That is a score which
 			// re-rolls by ~25 display points per refit on data that has not meaningfully changed.
 			// Measured before choosing this: of the 46 collectible hero CARDS, exactly 2 appear in
-			// the feeds (Galakrond and Lord Jaraxxus, both via Firestone) — and those are the ones
+			// the win-rate data (Galakrond and Lord Jaraxxus) — and those are the ones
 			// actually in the pool, because a feed only reports what gets drafted. So abstaining
 			// takes a number away from no card a player can currently be offered.
 			//

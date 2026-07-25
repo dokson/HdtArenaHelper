@@ -29,7 +29,7 @@ namespace HdtArenaHelper.Tests
 			public double Weight { get; }
 			public bool IsLoaded => true;
 			// A property of the SOURCE, not of one card: a feed with no row for the card under test
-			// must still count as empirical, exactly as HsReplay/Firestone do.
+			// must still count as empirical, exactly as a real win-rate source does.
 			public bool HasSamples { get; }
 			public Task EnsureLoadedAsync() => Task.CompletedTask;
 			public SourceScore? GetNormalizedScore(int dbfId, HearthDb.Enums.CardClass draftClass = HearthDb.Enums.CardClass.INVALID)
