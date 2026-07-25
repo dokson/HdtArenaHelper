@@ -285,9 +285,15 @@ fourth statistic.**
 
 ### Open, in priority order
 
-1. Per-type stat interactions (`attack_minion`, `health_minion`), rarity as dummies, and a decision
-   on hero cards (one supporting row — arguably the runtime should decline to score them rather
-   than pretend).
+1. Per-type stat interactions (`attack_minion`, `health_minion`). ~~A decision on hero cards~~ —
+   **decided, see 13**: the runtime declines to score them. ~~Rarity as dummies~~ — **closed**: the
+   dummies were tried and every metric got worse (10), and the ordinal it would replace is fitted at
+   **+0.00** (|w|/se 0.0, sign consistency 0.58), below the rounding floor, so `rarity_ord` is not
+   even present in the shipped json — rarity already contributes exactly nothing at runtime. This
+   matches what players say and the data agrees with: a common can outclass an epic, and the price
+   tag is not the effect. Do not reopen it without a mechanism, not a hunch. The one rarity-shaped
+   term left is `is_legendary` (+0.59, se 0.42) — also inside the noise band, and a candidate for the
+   same treatment.
 2. Reduce per-card variance, or reduce this source's authority further. Given 6 and 7, the second
    is the honest option.
 3. Only then calibrate the output-space gate on the bootstrap null.
@@ -407,6 +413,82 @@ class-blind behaviour exactly, and a test pins that.
 to check whether damping the penalty improves picks. What changed is the INPUT — measured per-patch
 availability instead of an implicit "every class runs every tribe equally", which the table shows is
 false by up to 28x. The bound and the one-way direction remain the guardrail.
+
+### 13. Hero cards: the runtime now declines to score them (open item 1, answered)
+
+`is_hero` has **one supporting row**. It is not an estimate; it is a baseline offset that also has
+to cancel the literal 30 health a hero card reports, and both ways of touching it were already
+measured to be worse: dropping the dummy moved Frost Lich Jaina 76.6 → 53.6, zeroing the health
+moved the coefficient −0.08 → −3.66 ± 1.76. The 2026-07-25 refit added the third data point — the
+coefficient went −0.08 → **+0.77**, with se 0.98 and sign consistency **0.46**. A term whose sign
+is a coin flip, carrying a whole card type, produces a score that re-rolls by ~25 display points
+between refits on data that barely moved.
+
+So the fit keeps the dummy (removing it contaminates the health slope) and **`HeuristicArenaDataSource`
+returns null for `CardType.HERO`** instead. Fitting and inference are different acts; only the second
+changed.
+
+**What it costs, measured** — of the **46** collectible hero CARDS in HearthDb, exactly **2** appear
+in either feed's cache: Galakrond, the Unbreakable and Lord Jaraxxus, both via Firestone. A feed only
+reports what actually gets drafted, so those two are also the ones in the pool: abstaining removes a
+number from **no card a player can currently be offered**. Frost Lich Jaina, the old golden, is
+covered by neither feed and is not in the pool.
+
+Where nothing at all covers a hero card, the plaque shows no score: with every source abstaining,
+`ScoreAggregator` returns `Empty` at its `weightTotal <= 0` guard, which is **before** the
+shrink-toward-50 path (that one needs a component to shrink). This surprised the review that caught
+it, and it is worth stating plainly rather than assuming the shrink is a universal safety net.
+
+The rejected alternative is worth naming, because it is the intuitive one: *hero cards are obviously
+strong, so give them a bonus.* Probably true, and still not admissible — hand-tuned card values are
+the thing this project measured to be **worse than nothing** (§ "Central methodological finding").
+If hero cards deserve credit, it has to arrive as win-rate data.
+
+### 14. Rarity is not an input any more (`rarity_ord` and `is_legendary` removed)
+
+**Decided on the mechanism, not on the metrics.** Rarity is a print-run label. What makes a legendary
+strong is an above-curve statline and unique text — both of which the model already reads directly —
+so letting the label carry a coefficient lets it collect credit that belongs to the card. Commons
+routinely outclass epics, and the model should have no way to disagree.
+
+The statistical case was already there but is weaker than it looks: `rarity_ord` fitted to **+0.00**
+(|w|/se 0.0, sign consistency 0.58) and was below the rounding floor, so it never even reached the
+shipped json; `is_legendary` was **+0.59 ± 0.42**, inside the noise band. The rarity *dummies* had
+been tried in 10 and made every metric worse.
+
+**One checkable consequence**, which is worth more here than any correlation: **Deathwing went 16.01
+→ 5.12**. A 10-mana 12/12 that hands the opponent the board belongs at the floor; the label had been
+worth ~10 display points on its own. Its golden literal now pins that.
+
+**What the refit reported, and why it is NOT the argument:**
+
+| | committed (24/07) | same data, WITH rarity | same data, WITHOUT |
+|---|---|---|---|
+| `cv_within_class_rho` | 0.2009 | 0.2228 | 0.2265 |
+| `holdout_random_rho` | 0.2831 | 0.3132 | 0.3156 |
+| `holdout_thin_rho` | 0.0871 | 0.0400 | 0.0884 |
+| bootstrap noise floor | 31.16% | 31.16% | 28.98% |
+| `per_card_shift_p95` | — | 17.0 pts | 15.4 pts |
+| selected `alpha` | 300 | 300 | **100** |
+
+Every column moved the right way, and **that is not evidence**. An adversarial review of exactly this
+table found the hole: `SelectAlphaByCv` re-picks alpha per feature set, and it did (300 → 100), so
+these are three separately-tuned models rather than one model minus two columns. Worse, the thin
+statistics carry no standard error at all — `randomScores` is averaged over `CvRepeats` while
+`thinRho`/`thinSlope` are computed once — and on ~90 cards against a near-null signal a 0.05 move in
+rho is unremarkable. The 0.087 → 0.040 → 0.088 path is a statistic wandering, not a loss and a
+recovery. (One correction to that review: the thin decile is the *lowest-games* cards, a deterministic
+set, so between the two same-data refits it is not draw luck — it is alpha and the feature set. That
+makes the comparison cleaner, not significant.)
+
+**`model_only_shrink_measured` moved 0.339 → 0.263 → 0.471 across three fits and was NOT adopted.**
+`ScoreAggregator.ModelOnlyShrink` stays the hardcoded 0.34: a runtime constant derived from a ratio
+whose numerator is a single-draw slope over ~90 cards has no business being re-committed automatically.
+That the trainer only *reports* it is the design working.
+
+**Open, from this**: give `thinRho` and `thinSlope` a bootstrap interval (or repeat them the way
+`randomScores` is repeated) before anyone reads them run-over-run again. Until then they are direction,
+not measurement.
 
 ## Known limitations
 

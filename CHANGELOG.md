@@ -5,7 +5,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.1.3
+## [0.1.4] - 2026-07-25
+
+### Changed
+
+- **Rarity no longer influences a card's score.** `rarity_ord` and `is_legendary` are gone from the
+  model: rarity is a print-run label, and what actually makes a legendary strong — an above-curve
+  statline, unique text — the model already reads directly, so the label was collecting credit that
+  belongs to the card. The clearest illustration is Deathwing, which fell from 16.01 to 5.12: a
+  10-mana 12/12 that hands over the board belongs at the floor, and it had been getting ~10 display
+  points for its rarity alone. Weights were re-fit without the two features and adopted, with the
+  golden literals updated. The fit's own numbers all moved the right way too, but they are NOT the
+  argument and REPORT.md 14 says why (the regularization strength is re-selected per feature set,
+  and the thin-sample statistics carry no standard error).
+- **The offline heuristic no longer scores hero cards; it abstains.** Its `is_hero` term has a single
+  supporting row and also has to cancel the 30 health those cards report, so it was never an estimate
+  — this week's refit flipped it from −0.08 to +0.77 with a standard error of 0.98 and sign
+  consistency 0.46, i.e. a coin toss deciding a whole card type, worth ~25 display points. Measured
+  cost of abstaining: of the 46 collectible hero cards, exactly 2 appear in either win-rate feed —
+  and those two are the ones actually in the pool, since a feed reports what gets drafted. So no card
+  a player can be offered loses its number. The intuitive fix — hero cards are strong, give them a
+  bonus — stays refused: hand-tuned card values are what this project measured to be worse than
+  nothing.
+
+### Fixed
+
+- **The in-game overlay no longer appears outside an arena match.** With an arena run open, a
+  **Battlegrounds** hero/trinket pick arrives through the same choice zone, on the same gameplay
+  scene, as a Discover — so it was scored with arena win-rates and drawn over the Battlegrounds
+  board, which is disruptive enough to make disabling the plugin the reasonable response. The gate
+  that was supposed to prevent this asked whether an arena RUN existed; a run stays open across
+  modes, so it answered yes all through Battlegrounds. Both in-game watchers (Discover and mulligan)
+  now also require the current MATCH to be arena, read from the client's game type. It stays
+  permissive only where the client says nothing — an unreadable type, or the "unknown" reported for
+  a moment as a game starts, which is exactly the mulligan's window; a stated non-arena type is a
+  definite no. When it blocks it logs one line, so a missing overlay is diagnosable rather than
+  mysterious.
+
+## [0.1.3] - 2026-07-25
 
 ### Added
 
@@ -290,6 +327,8 @@ First release.
 - The synergy engine is designed but not yet implemented (a `NullSynergyEngine`
   placeholder is wired in).
 
+[0.1.4]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/dokson/HdtArenaHelper/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/dokson/HdtArenaHelper/releases/tag/v0.1.0

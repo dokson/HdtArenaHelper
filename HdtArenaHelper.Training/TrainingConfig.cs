@@ -48,10 +48,17 @@ namespace HdtArenaHelper.Training
 		internal static readonly string[] RedundantFeatures = { "tx_discover" };
 
 		// The support floor applies ONLY to kw_*/tx_* indicators — the things we are trying to
-		// ESTIMATE an effect for. It must never drop a structural/type feature: is_hero has one
-		// supporting row, but removing the dummy does not remove a noisy estimate, it removes
-		// the baseline offset for that card type, and hero cards are still scored at runtime
-		// (dropping it moved Frost Lich Jaina from 76.6 to 53.6 with health=30 unoffset).
+		// ESTIMATE an effect for. It must never drop a structural/type feature: removing such a
+		// dummy does not remove a noisy estimate, it removes the baseline offset for that card
+		// type (dropping is_hero moved Frost Lich Jaina from 76.6 to 53.6, with health=30 left
+		// unoffset).
+		//
+		// is_hero is the degenerate case and is now handled at INFERENCE instead: it has one
+		// supporting row, and the runtime source refuses to score HERO cards at all rather than
+		// emit an offset that re-rolls every refit. The dummy stays in the fit — it still absorbs
+		// that row instead of letting the health slope do it — but nothing downstream reads its
+		// coefficient any more. Do not "clean it up" by dropping it: that reintroduces the very
+		// contamination this floor exists to prevent.
 		internal static bool IsEstimatedIndicator(string feature)
 			=> feature.StartsWith("kw_", StringComparison.Ordinal)
 				|| feature.StartsWith("tx_", StringComparison.Ordinal);

@@ -115,10 +115,16 @@ namespace HdtArenaHelper.Training
 		// The cards pinned by HeuristicArenaDataSourceTests: after adopting a re-fit,
 		// paste these values over the test's golden literals (the manual touch is the
 		// tripwire that proves a human looked at the new weights).
+		// NEW1_030 (Deathwing) earns its slot twice over: it is the LEGENDARY in the set, so it
+		// pins that rarity is not a scoring input, and it is a card whose statline is genuinely
+		// bad, so a model that quietly rewards the label shows up here as an inflated score.
+		// ICC_833 (Frost Lich Jaina) was removed when the runtime stopped scoring HERO cards:
+		// printing a golden for a card the plugin refuses to score invites pasting a literal
+		// that can never match.
 		internal static readonly string[] GoldenCards =
 		{
 			"LOOT_413", "CS2_189", "EX1_093", "CS2_106", "CS2_029", "EX1_050",
-			"GIL_828", "CS2_235", "EX1_046", "NEW1_030", "ICC_833",
+			"GIL_828", "CS2_235", "EX1_046", "NEW1_030",
 		};
 
 		internal static void PrintGoldenScores(IDictionary<string, double> weights, double intercept,

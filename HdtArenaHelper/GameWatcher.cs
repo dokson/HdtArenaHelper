@@ -24,9 +24,19 @@ namespace HdtArenaHelper
 		private DateTime _nextPollUtc = DateTime.MinValue;
 		private bool _readErrorLogged;
 		private bool _sceneErrorLogged;
+		private bool _gameTypeErrorLogged;
+		private int _blockedGameTypeLogged = -1;
 
 		/// <summary>The only scene in which this watcher's screen can exist.</summary>
 		protected abstract SceneMode Scene { get; }
+
+		/// <summary>
+		/// Does this watcher's screen only exist inside an ARENA match? An arena RUN being open is not
+		/// the same thing, and the difference was a live bug: with a 30-card Paladin run in progress, a
+		/// Battlegrounds hero/trinket choice sits in the SAME choice zone on the SAME GAMEPLAY scene, so
+		/// the choice watcher scored it and painted arena win-rates over a Battlegrounds board.
+		/// </summary>
+		protected virtual bool ArenaMatchOnly => false;
 
 		/// <summary>Read the client and fire events. Exceptions are handled by the template.</summary>
 		protected abstract void PollCore();
@@ -40,6 +50,8 @@ namespace HdtArenaHelper
 			_nextPollUtc = DateTime.MinValue;
 			_readErrorLogged = false;
 			_sceneErrorLogged = false;
+			_gameTypeErrorLogged = false;
+			_blockedGameTypeLogged = -1;
 		}
 
 		public void Poll()
@@ -50,6 +62,12 @@ namespace HdtArenaHelper
 			_nextPollUtc = now + PollInterval;
 
 			if(!IsSceneActive())
+			{
+				OnSceneLeft();
+				return;
+			}
+
+			if(ArenaMatchOnly && !IsArenaMatch())
 			{
 				OnSceneLeft();
 				return;
@@ -91,6 +109,67 @@ namespace HdtArenaHelper
 					Log($"scene state unavailable, scene gate disabled: {ex.Message}");
 				}
 				return true;
+			}
+		}
+
+		/// <summary>
+		/// Is the current MATCH an arena one? Fails permissive in the same spirit as the scene gate, but
+		/// only for states that carry no information: an unreadable type, or the GT_UNKNOWN the client
+		/// reports for a moment while a game starts — which is exactly when the mulligan screen appears,
+		/// so treating it as "not arena" would cost that feature its whole window. A type the client
+		/// states and that is not arena is a definite no.
+		/// </summary>
+		private bool IsArenaMatch()
+		{
+			int gameType;
+			try
+			{
+				gameType = Reflection.Client.GetGameType();
+				_gameTypeErrorLogged = false;
+			}
+			catch(Exception ex)
+			{
+				if(!_gameTypeErrorLogged)
+				{
+					_gameTypeErrorLogged = true;
+					Log($"game type unavailable, arena-match gate disabled: {ex.Message}");
+				}
+				return true;
+			}
+
+			if(IsArenaGameType(gameType))
+			{
+				_blockedGameTypeLogged = -1;
+				return true;
+			}
+
+			// One line per streak: the point is to explain a MISSING overlay in the log, not to narrate
+			// every tick of a Battlegrounds game.
+			if(_blockedGameTypeLogged != gameType)
+			{
+				_blockedGameTypeLogged = gameType;
+				Log($"not an arena match ({(HearthDb.Enums.GameType)gameType}); staying hidden");
+			}
+			return false;
+		}
+
+		/// <summary>
+		/// The arena game types, including their vs-AI variants. Anything else — Battlegrounds, ranked,
+		/// a brawl — is a match whose cards this plugin has no win-rate for. An id HearthDb does not
+		/// know is treated as non-arena: a future mode is not arena until someone here says it is.
+		/// </summary>
+		internal static bool IsArenaGameType(int gameType)
+		{
+			switch((HearthDb.Enums.GameType)gameType)
+			{
+				case HearthDb.Enums.GameType.GT_ARENA:
+				case HearthDb.Enums.GameType.GT_ARENA_PLAYER_VS_AI:
+				case HearthDb.Enums.GameType.GT_UNDERGROUND_ARENA:
+				case HearthDb.Enums.GameType.GT_UNDERGROUND_ARENA_PLAYER_VS_AI:
+				case HearthDb.Enums.GameType.GT_UNKNOWN:
+					return true;
+				default:
+					return false;
 			}
 		}
 

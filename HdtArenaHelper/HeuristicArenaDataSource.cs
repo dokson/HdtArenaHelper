@@ -96,6 +96,31 @@ namespace HdtArenaHelper
 			if(card.Id.StartsWith("HERO_", StringComparison.Ordinal))
 				return null;
 
+			// Draftable HERO cards get no heuristic opinion either — an abstention, not a zero.
+			// The `is_hero` dummy has ONE supporting row, so it is not an estimate but an offset
+			// hanging off a single observation, and it carries the whole card type: it exists to
+			// cancel the literal 30 health these cards report. Both directions have been measured
+			// and both are bad — zeroing the health moved the coefficient to -3.66 +/- 1.76, and
+			// dropping the dummy moved Frost Lich Jaina from 76.6 to 53.6. That is a score which
+			// re-rolls by ~25 display points per refit on data that has not meaningfully changed.
+			// Measured before choosing this: of the 46 collectible hero CARDS, exactly 2 appear in
+			// the feeds (Galakrond and Lord Jaraxxus, both via Firestone) — and those are the ones
+			// actually in the pool, because a feed only reports what gets drafted. So abstaining
+			// takes a number away from no card a player can currently be offered.
+			//
+			// Where nothing covers one, the plaque shows no score at all: with every source
+			// abstaining the aggregator returns Empty (ScoreAggregator's weightTotal <= 0 guard),
+			// which is BEFORE the shrink-toward-50 path — that one needs a component to shrink.
+			// An earlier version of this comment claimed the shrink caught it; it does not.
+			// Showing nothing is the correct outcome anyway: it says "no data", which is true,
+			// where the old behaviour said "48.74" and re-rolled it next refit.
+			//
+			// Do NOT replace this with a hand-picked bonus because hero cards "are obviously
+			// good": that is the hand-tuning this project has already measured to be worse than
+			// nothing. If they deserve credit, the win-rate feeds are where it must come from.
+			if(card.Type == CardType.HERO)
+				return null;
+
 			double raw;
 			try { raw = Model.Score(BuildFeatures(card)); }
 			catch { return null; }
@@ -174,15 +199,21 @@ namespace HdtArenaHelper
 			if(card.Class == CardClass.NEUTRAL)
 				f["is_neutral"] = 1;
 
-			// rarity_ord is the ordinal (rare=1, epic=2, legendary=3); legendaries carry an extra
-			// is_legendary term. Splitting this into one dummy per rarity was TRIED and measured
-			// no better (see REPORT.md), so the simpler committed encoding stands.
-			switch(card.Rarity)
-			{
-				case Rarity.RARE: f["rarity_ord"] = 1; break;
-				case Rarity.EPIC: f["rarity_ord"] = 2; break;
-				case Rarity.LEGENDARY: f["rarity_ord"] = 3; f["is_legendary"] = 1; break;
-			}
+			// Rarity itself is NOT a feature. It is a print-run label, not a property of the card
+			// in play — commons routinely outclass epics — and every measurement agreed: the
+			// ordinal fitted to +0.00 (|w|/se 0.0, sign consistency 0.58), below the rounding
+			// floor, so `rarity_ord` was already absent from the shipped json and contributed
+			// exactly nothing; one dummy per rarity was tried instead and every metric got worse
+			// (REPORT.md 10). Dropping it from the fit is therefore free — an absent weight reads
+			// as 0 — and it stops a spurious column from soaking up variance at the next refit.
+			//
+			// `is_legendary` is gone for the same reason, and it was the harder call: legendaries
+			// really do tend to be strong, so the term "worked". But it is still the print label
+			// standing in for the thing that actually makes them strong — an above-curve statline
+			// and unique text — both of which the model already reads directly. Keeping it lets
+			// the label collect credit that belongs to the card, and it was inside the noise band
+			// anyway (+0.59, se 0.42). Where a legendary is genuinely a bomb, the win-rate feeds
+			// say so with real games, at 2x this source's weight.
 
 			if(card.Race != Race.INVALID)
 				f["has_tribe"] = 1;

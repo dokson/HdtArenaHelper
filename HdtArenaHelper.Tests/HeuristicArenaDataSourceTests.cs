@@ -26,16 +26,19 @@ namespace HdtArenaHelper.Tests
 		/// re-running the trainer and reading the scores.
 		/// </summary>
 		[Theory]
-		[InlineData("LOOT_413", 18.38)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 36.17)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 34.98)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 50.95)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 51.07)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 33.09)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 53.16)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 51.11)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 27.08)]  // Dark Iron Dwarf - conditional buff
-		[InlineData("NEW1_030", 16.01)] // Deathwing - near the floor
+		[InlineData("LOOT_413", 19.78)] // Plated Beetle - vanilla-ish minion
+		[InlineData("CS2_189", 40.34)]  // Elven Archer - battlecry damage
+		[InlineData("EX1_093", 38.20)]  // Defender of Argus - buff + taunt text
+		[InlineData("CS2_106", 51.95)]  // Fiery War Axe - weapon path
+		[InlineData("CS2_029", 52.93)]  // Fireball - spell with damage magnitude
+		[InlineData("EX1_050", 32.49)]  // Coldlight Oracle - draw text
+		[InlineData("GIL_828", 54.02)]  // Dire Frenzy - buff spell
+		[InlineData("CS2_235", 53.76)]  // Northshire Cleric - persistent draw
+		[InlineData("EX1_046", 30.28)]  // Dark Iron Dwarf - conditional buff
+		// The LEGENDARY of the set, and a card whose statline is genuinely bad: it fell from
+		// 16.01 to 5.12 when `is_legendary` was removed, i.e. the label had been worth ~10
+		// display points on its own. That is the number this literal exists to keep honest.
+		[InlineData("NEW1_030", 5.12)]  // Deathwing - at the floor, where it belongs
 		public void Matches_training_golden_scores(string cardId, double expected)
 		{
 			var score = Source.GetNormalizedScore(Dbf(cardId));
@@ -62,16 +65,17 @@ namespace HdtArenaHelper.Tests
 		}
 
 		[Fact]
-		public void Draftable_hero_cards_are_scored()
+		public void Draftable_hero_cards_get_no_heuristic_opinion()
 		{
-			// Hero CARDS (not HERO_* skins) are draftable, unlike skins. The is_hero
-			// bonus is fit together with their constant 30 health, so the net value is
-			// what the regression decided, not the raw bonus. With the drawn-win-rate
-			// target hero cards rate high: the bomb gets credit when actually drawn.
-			// Golden from the training tool.
-			var score = Source.GetNormalizedScore(Dbf("ICC_833")); // Frost Lich Jaina
-			Assert.NotNull(score);
-			Assert.Equal(48.74, score!.Value.Score, 0.005);
+			// Hero CARDS (not HERO_* skins) are draftable, and this source used to score them
+			// — the golden literal was 48.74. It abstains now because the number was not an
+			// estimate: `is_hero` has ONE supporting row and carries the whole card type, so
+			// the score re-rolled by ~25 display points between refits on data that had barely
+			// moved (dropping the dummy: 76.6 -> 53.6; zeroing the health: -0.08 -> -3.66).
+			// The cost of abstaining is near zero — hero cards are collectible, so the win-rate
+			// feeds cover them — and where nothing covers them the aggregator's shrink says 50,
+			// which is what "we do not know" should look like.
+			Assert.Null(Source.GetNormalizedScore(Dbf("ICC_833"))); // Frost Lich Jaina
 		}
 
 		/// <summary>
@@ -105,9 +109,11 @@ namespace HdtArenaHelper.Tests
 				if(!card.Collectible || card.DbfId == 0 || kv.Key.StartsWith("HERO_", System.StringComparison.Ordinal))
 					continue;
 				if(card.Type != CardType.MINION && card.Type != CardType.SPELL &&
-				   card.Type != CardType.WEAPON && card.Type != CardType.LOCATION &&
-				   card.Type != CardType.HERO)
+				   card.Type != CardType.WEAPON && card.Type != CardType.LOCATION)
 					continue;
+				// HERO cards are deliberately unscored by this source — see
+				// Draftable_hero_cards_get_no_heuristic_opinion. There is no arithmetic to
+				// recompute for a card the scorer refuses to answer on.
 
 				var raw = intercept;
 				foreach(var f in HeuristicArenaDataSource.BuildFeatures(card))

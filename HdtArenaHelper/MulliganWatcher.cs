@@ -41,6 +41,9 @@ namespace HdtArenaHelper
 
 		protected override SceneMode Scene => SceneMode.GAMEPLAY;
 
+		/// <summary>Keep statistics are arena statistics; an arena run being open is not an arena game.</summary>
+		protected override bool ArenaMatchOnly => true;
+
 		protected override void OnSceneLeft() => Clear();
 
 		public override void Reset()

@@ -31,14 +31,16 @@ namespace HdtArenaHelper
 	/// same choice zone — by polling HearthMirror, and reports them so the overlay can score them
 	/// with the SAME engine the draft uses.
 	///
-	/// Two gates, both deliberate:
+	/// Three gates, all deliberate:
 	///   - the active scene must be GAMEPLAY. The draft has its own watcher; sharing one would mean
 	///     a choice list left in client memory could paint over the wrong screen, which is the bug
 	///     the draft path already had to fix twice.
-	///   - the player must be in an ARENA run. Every number this plugin shows is an arena win-rate;
-	///     rendering it over a Standard game would present a statistic measured somewhere else as
-	///     if it applied here. When there is no arena deck we show nothing rather than a wrong
-	///     number.
+	///   - the current MATCH must be an arena one (<see cref="GameWatcher.ArenaMatchOnly"/>). Every
+	///     number this plugin shows is an arena win-rate; rendering it over a Standard game would
+	///     present a statistic measured somewhere else as if it applied here.
+	///   - the player must be in an ARENA run, for the deck that gives the choice its class context.
+	///     Note this is NOT a substitute for the gate above: the run stays open across modes, which
+	///     is how a Battlegrounds trinket choice once got scored as a Discover.
 	/// </summary>
 	public class CardChoiceWatcher : GameWatcher
 	{
@@ -50,6 +52,12 @@ namespace HdtArenaHelper
 
 		/// <summary>Only ever live during a game; the base gate enforces it.</summary>
 		protected override SceneMode Scene => SceneMode.GAMEPLAY;
+
+		/// <summary>
+		/// The scene gate alone is not enough here: Battlegrounds is GAMEPLAY too, and its hero/trinket
+		/// choices arrive through this very zone.
+		/// </summary>
+		protected override bool ArenaMatchOnly => true;
 
 		protected override void OnSceneLeft() => Clear();
 
