@@ -37,3 +37,10 @@ hsreplay_*.json
 # Editor / tooling local state
 .claude/
 .codegraph/
+
+# Trainer payload snapshot: makes a fit reproducible / re-runnable offline, but it is
+# a cache of someone else's public data and must never be committed or redistributed.
+/HdtArenaHelper.Training/.snapshot/
+
+# Trainer run metrics: a generated artifact of each fit, not an input.
+/HdtArenaHelper.Training/metrics.json

@@ -69,6 +69,50 @@ namespace HdtArenaHelper
 				: (sorted[mid - 1] + sorted[mid]) / 2.0;
 		}
 
+		/// <summary>
+		/// A class's estimated ARENA win-rate in real percentage points, from per-card tallies:
+		/// pool the class's (wins, games) and re-centre so the whole pool sits at 50.
+		///
+		/// The re-centring is not cosmetic, it removes a measured bias. Weighting cards by their
+		/// games is the only way to recover a deck-level rate from card-level data, but in arena a
+		/// winning deck keeps playing (up to 12 wins) while a losing one stops at 3, so games-
+		/// weighting oversamples winning decks. Measured on the live payloads, the pooled rate comes
+		/// out at 53.4% (HSReplay) and 55.6% (Firestone) where a true average win-rate must be ~50.
+		/// Subtracting each source's own pooled offset removes it, and the two then agree within
+		/// ~2pp with identical ordering — and land within ~3pp of the figures HDT's paid helper
+		/// shows for the same classes.
+		///
+		/// So this is a CALIBRATED ESTIMATE, not a published number: label it as such wherever it
+		/// is shown. Only the offset is removed; the spread between classes is left untouched.
+		/// </summary>
+		public static Dictionary<CardClass, double> RecentreClassWinRates(
+			IReadOnlyDictionary<CardClass, (double Wins, double Games)> tallies)
+		{
+			var result = new Dictionary<CardClass, double>(tallies.Count);
+			double pooledWins = 0, pooledGames = 0;
+			foreach(var kv in tallies)
+			{
+				if(kv.Value.Games <= 0)
+					continue;
+				pooledWins += kv.Value.Wins;
+				pooledGames += kv.Value.Games;
+			}
+			if(pooledGames <= 0)
+				return result;
+
+			var offset = 100.0 * pooledWins / pooledGames - NeutralWinRate;
+			foreach(var kv in tallies)
+			{
+				if(kv.Value.Games <= 0)
+					continue;
+				result[kv.Key] = 100.0 * kv.Value.Wins / kv.Value.Games - offset;
+			}
+			return result;
+		}
+
+		/// <summary>Where the whole pool must sit: every game is one deck's win and another's loss.</summary>
+		public const double NeutralWinRate = 50.0;
+
 		/// <summary>Median absolute deviation, scaled to a normal-consistent SD.</summary>
 		public static double RobustSigma(IEnumerable<double> values, double center)
 		{

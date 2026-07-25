@@ -3,27 +3,33 @@
   <Import Project="..\Version.props" Condition="Exists('..\Version.props')" />
   <Import Project="..\HSDT.props" />
 
+  <!--
+    Tests for the trainer's deterministic pieces. Unlike HdtArenaHelper.Numerics.Tests this one
+    DOES need HDT installed: the trainer references the plugin (to share BuildFeatures) and so
+    pulls in HearthDb. Pure-maths tests therefore belong in Numerics.Tests, not here.
+  -->
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <TargetFramework>net472</TargetFramework>
     <LangVersion>9.0</LangVersion>
     <Nullable>enable</Nullable>
     <PlatformTarget>x64</PlatformTarget>
-    <AssemblyName>HdtArenaHelper.Training</AssemblyName>
-    <RootNamespace>HdtArenaHelper.Training</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
-  <!-- Reuse the plugin's BuildFeatures (shared, so train/inference features can't drift). -->
   <ItemGroup>
-    <ProjectReference Include="..\HdtArenaHelper\HdtArenaHelper.csproj" />
-    <ProjectReference Include="..\HdtArenaHelper.Numerics\HdtArenaHelper.Numerics.csproj" />
+    <ProjectReference Include="..\HdtArenaHelper.Training\HdtArenaHelper.Training.csproj" />
   </ItemGroup>
 
-  <!-- HDT-shipped assemblies (HearthDb metadata + the plugin's own references). -->
   <ItemGroup>
     <Reference Include="HearthstoneDeckTracker">
       <HintPath>$(HSDTPath)\HearthstoneDeckTracker.exe</HintPath>

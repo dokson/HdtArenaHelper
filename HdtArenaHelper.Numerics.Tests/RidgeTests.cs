@@ -1,8 +1,7 @@
 using System;
-using HdtArenaHelper.Training;
 using Xunit;
 
-namespace HdtArenaHelper.Tests
+namespace HdtArenaHelper.Numerics.Tests
 {
 	/// <summary>
 	/// Validates the ported ridge solver (<see cref="Ridge.FitRidgeStandardized"/>)

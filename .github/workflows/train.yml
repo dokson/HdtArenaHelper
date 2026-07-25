@@ -10,6 +10,12 @@ on:
     # patch; the diff gate below means a quiet week costs a CI run, not a PR.
     - cron: '0 6 * * 5'
 
+# One retrain at a time: a workflow_dispatch racing the Friday cron would otherwise both
+# force-push retrain/<date> and then both try to open the same PR.
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: windows-latest
@@ -40,30 +46,123 @@ jobs:
         run: dotnet run --project HdtArenaHelper.Training -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" | Tee-Object trainer.log
 
       - name: Open PR when the weights moved
+        id: pr
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $gen = 'HdtArenaHelper.Training/arena_weights.generated.json'
           $committed = 'HdtArenaHelper.Training/arena_weights.json'
-          if((Get-Content $gen -Raw) -eq (Get-Content $committed -Raw)) {
-            Write-Host 'GATE PASS: weights unchanged, no PR.'
+          if(-not (Test-Path $gen)) { throw "Trainer produced no $gen." }
+
+          # Gate on metrics.json, never on byte equality and never by scraping the log. Byte
+          # equality never matches (the target is live data, so every refit moves every weight),
+          # and the log form was culture-dependent — a runner prints "0.44" where a dev machine
+          # prints "0,44" — which is a gate that mis-parses silently one day.
+          #
+          # The decision is made in OUTPUT space: how far would a score the user actually sees
+          # move? That is the only quantity worth waking a reviewer for. Raw coefficient deltas
+          # mix units (a 0.15 move on the attack slope is a catastrophe, the same move on a
+          # 3-support keyword is nothing).
+          #
+          # The threshold is a plain absolute rate, NOT the statistically ideal one. The trainer
+          # also derives a bootstrap noise floor (resample the same cards, refit, measure the same
+          # statistic), which is the correct threshold in principle — but it reads ~31% of picks at
+          # this model's stability, and 15% of picks still flip even when the model claimed a
+          # winner by more than 10 display points. Calibrating on that would mark every real refit
+          # "not material" and silently keep stale weights, which is worse than PR noise. So the
+          # floor is reported and the decision uses a rate a human can reason about. Fixing this
+          # means making the model stabler, not picking a fourth statistic — see REPORT.md.
+          $metricsPath = 'HdtArenaHelper.Training/metrics.json'
+          if(-not (Test-Path $metricsPath)) { throw "Trainer produced no $metricsPath." }
+          $metrics = Get-Content $metricsPath -Raw | ConvertFrom-Json
+          Write-Host ("pick flips vs committed: {0:P2} | bootstrap noise floor {1:P2} (reported, not enforced) | per-card volatility p95 {2:N1} pts" -f `
+            $metrics.pick_flip_rate, $metrics.materiality_threshold, $metrics.per_card_shift_p95)
+          Write-Host ("cv within-class rho={0:N4} | holdout random={1:N4} thin={2:N4}" -f `
+            $metrics.cv_within_class_rho, $metrics.holdout_random_rho, $metrics.holdout_thin_rho)
+          if($metrics.unreliable_coefficients.Count -gt 0) {
+            Write-Host ("coefficients within 2 standard errors of zero: " + ($metrics.unreliable_coefficients -join ', '))
+          }
+          # Assert the properties EXIST before branching: `-not $null` is $true in PowerShell, so a
+          # renamed or missing field would read as "not material" and silently suppress the PR.
+          foreach($field in 'material_change', 'committed_readable', 'pick_flip_rate') {
+            if($null -eq $metrics.$field) { throw "metrics.json has no '$field'; refusing to gate." }
+          }
+          if(-not $metrics.committed_readable) {
+            Write-Host 'GATE: committed weights unreadable - opening a PR so a human looks.'
+          }
+          elseif(-not $metrics.material_change) {
+            Write-Host 'GATE PASS: recommendations unchanged beyond the material rate, no PR.'
             exit 0
           }
+
+          # A PR opened with GITHUB_TOKEN does NOT trigger workflows, so `build` will never run
+          # on this branch — the golden tests that exist to catch a weights change would be
+          # silently skipped on the one PR they are for. Run them here instead, against the NEW
+          # weights, and report the outcome in the PR body so the reviewer knows which goldens
+          # moved. A failure is expected and informative, so it must not abort the PR.
+          Copy-Item $gen $committed -Force
+          # A golden failure here is the EXPECTED outcome of a weights change and must not abort
+          # the step, so stderr from dotnet stays non-terminating for these two commands only.
+          $ErrorActionPreference = 'Continue'
+          dotnet build HdtArenaHelper.sln -c Release -warnaserror "/p:HSDTPath=${{ steps.hdt.outputs.path }}" 2>&1 |
+            Tee-Object build.log
+          $buildOk = $LASTEXITCODE -eq 0
+          if($buildOk) {
+            dotnet test HdtArenaHelper.Tests/HdtArenaHelper.Tests.csproj -c Release `
+              "/p:HSDTPath=${{ steps.hdt.outputs.path }}" --no-build 2>&1 | Tee-Object tests.log
+            $testsOk = $LASTEXITCODE -eq 0
+          } else { $testsOk = $false }
+          $ErrorActionPreference = 'Stop'
+          $verdict = if($testsOk) { 'PASS — goldens still match the new weights' }
+                     elseif($buildOk) { 'FAIL — goldens must be updated from the trainer output before merging' }
+                     else { 'FAIL — the build itself broke against the new weights' }
+          Write-Host "GOLDEN GATE: $verdict"
           $branch = "retrain/$(Get-Date -Format yyyy-MM-dd)"
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git checkout -b $branch
-          Copy-Item $gen $committed -Force
+          # The branch may already exist from an earlier run on the same day (checkout -b would
+          # fail). Only this workflow ever writes retrain/<date>, and a same-day re-run is meant
+          # to replace it, so a plain force is correct here — --force-with-lease would trip on
+          # "stale info" when the remote branch does not exist yet.
+          git checkout -B $branch
           git add $committed
           git commit -m 'Retrain heuristic weights against live arena data'
-          git push -u origin $branch
+          git push -u origin $branch --force
           # The trainer log carries the weight diff and the golden values to paste.
           $diff = Get-Content trainer.log -Raw
           @"
           Automated re-fit. Review the weight diff below, then update the golden tests
           in HeuristicArenaDataSourceTests with the printed values before merging.
 
+          **Golden gate (run in the retrain job — a GITHUB_TOKEN PR does not trigger ``build``):**
+          $verdict
+
           ~~~
           $diff
           ~~~
           "@ | Out-File pr-body.md -Encoding utf8
-          gh pr create --title "Retrain heuristic weights ($(Get-Date -Format yyyy-MM-dd))" --body-file pr-body.md --repo '${{ github.repository }}'
+          # A same-day re-run has already force-pushed this branch, so `gh pr create` would fail
+          # with "a pull request for branch ... already exists" AFTER the push — leaving new
+          # commits under a PR a human may be mid-review on, and a red job. Update the existing
+          # PR body instead when there is one.
+          $existing = gh pr list --repo '${{ github.repository }}' --head $branch --state open --json number --jq '.[0].number'
+          if ($existing) {
+            gh pr edit $existing --repo '${{ github.repository }}' --body-file pr-body.md
+            Write-Host "Updated existing retrain PR #$existing."
+          } else {
+            gh pr create --title "Retrain heuristic weights ($(Get-Date -Format yyyy-MM-dd))" --body-file pr-body.md --repo '${{ github.repository }}'
+          }
+
+      # On a golden-gate FAIL the reviewer needs the trainer output and the test log, not just the
+      # raw job console — which is the exact thing the gate design argues against relying on.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: retrain-logs
+          path: |
+            trainer.log
+            build.log
+            tests.log
+            HdtArenaHelper.Training/metrics.json
+            HdtArenaHelper.Training/arena_weights.generated.json
+          if-no-files-found: ignore

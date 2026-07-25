@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\Version.props" Condition="Exists('..\Version.props')" />
+
+  <!--
+    Deliberately does NOT import HSDT.props and references no HDT assembly, so
+    `dotnet test HdtArenaHelper.Numerics.Tests` runs on a machine without HDT installed —
+    the reason HdtArenaHelper.Numerics exists. Keep it that way: a card-metadata test belongs
+    in HdtArenaHelper.Tests, which needs the HDT-shipped HearthDb and cannot run standalone.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HdtArenaHelper.Numerics\HdtArenaHelper.Numerics.csproj" />
+  </ItemGroup>
+
+</Project>

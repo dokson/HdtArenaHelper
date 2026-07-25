@@ -36,9 +36,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # Select by author, not [0]: a fork branch can share the dependabot/** name
+          # and must never be the PR this job acts on (fail-closed either way, but
+          # picking the wrong PR would silently skip the real one).
           pr=$(gh pr list --repo "$REPO" --head "$HEAD" --state open \
-                 --json number,author --jq '.[0]')
+                 --json number,author \
+                 --jq '[.[] | select(.author.login == "dependabot[bot]" or .author.login == "app/dependabot")][0]')
           if [ -z "$pr" ] || [ "$pr" = "null" ]; then
             echo "No open PR for branch $HEAD; nothing to merge."
             exit 0
@@ -49,5 +54,9 @@ jobs:
             echo "PR #$number authored by $author, not Dependabot; skipping."
             exit 0
           fi
-          echo "Merging Dependabot PR #$number (branch $HEAD)."
-          gh pr merge "$number" --repo "$REPO" --squash --delete-branch
+          # Merge the exact commit CI went green on, not whatever the branch points at now:
+          # Dependabot force-pushes a rebase (or a newer bump) onto the same branch, so between
+          # the build finishing and this job running the head can move to an untested commit.
+          # --match-head-commit makes the merge fail rather than land unverified code.
+          echo "Merging Dependabot PR #$number (branch $HEAD, sha $SHA)."
+          gh pr merge "$number" --repo "$REPO" --squash --delete-branch --match-head-commit "$SHA"

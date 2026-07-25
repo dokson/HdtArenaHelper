@@ -67,25 +67,349 @@ Threshold sensitivity (H4 ridge OOF on ALL): >=100 → 0.271 (n=1158); >=500 →
   real residual per-class variation exists (warrior 0.417 vs shaman 0.063) but the current
   data is not enough to learn it reliably.
 
-## FINAL FORMULA (H4, dual-source ridge, units = percentage points of win-rate vs class mean)
-score = -0.17
-  + 5.28*is_hero + 0.93*is_weapon + 0.55*is_loc - 0.55*is_spell + 0.29*is_minion
-  - 1.27*is_neutral - 0.09*is_legendary - 0.05*rarity_ord
-  + 0.10*statline + 0.64*stat_per_mana - 0.23*attack - 0.27*health + 0.08*cost
-  - 0.20*weapon_value + 0.11*has_tribe
-  (keyword) - 2.86*charge + 1.49*windfury + 0.95*reborn + 0.88*stealth + 0.86*lifesteal
-  + 0.76*rush + 0.72*poisonous + 0.68*colossal + 0.66*freeze + 0.52*battlecry
-  + 0.31*secret + 0.30*outcast + 0.29*echo + 0.23*taunt + 0.21*discover + 0.08*divine_shield
-  - 4.25*forge - 1.10*spellpower - 0.64*magnetic - 0.56*deathrattle - 0.49*combo
-  (text) + 2.16*silence + 1.04*armor + 0.80*summon + 0.65*destroy_minion + 0.25*aoe
-  + 0.29*persistent + 0.15*mana_cheat + 0.14*restore_amt + 0.14*random + 0.13*draw
-  + 0.10*damage_amt + 0.21*tx_discover - 0.80*gain_card - 0.47*transform - 0.30*dmg_per_mana
+## The formula's SHAPE (never its coefficients)
 
-where: statline=(atk+hp)-(2*cost+1) minions only; stat_per_mana=(atk+hp)/(cost+1) minions only;
-weapon_value=(atk*dur)-(2*cost+1) weapons only; the tx_* are regex flags on the text (see
-BuildFeatures in the training tool); exact weights in arena_weights.json.
+```
+raw   = intercept + Σ weight[feature] · value[feature]
+shown = clamp(50 + 15 · (raw − anchor_median_raw) / anchor_sigma_raw, 0, 100)
+```
+
+Feature definitions: `statline = (atk+hp) − (2·cost+1)` and `stat_per_mana = (atk+hp)/(cost+1)`,
+both minions only; `weapon_value = (atk·dur) − (2·cost+1)`, weapons only; the `tx_*` are regex flags
+over the card text. All of them live in **`HeuristicArenaDataSource.BuildFeatures`**, which the
+trainer reuses so training and inference cannot drift.
+
+**The coefficients are deliberately NOT reproduced here.** This section used to list them, and it
+rotted immediately: it kept claiming `is_hero +5.28` when the committed artifact says **−0.08** (a
+sign flip on the very coefficient §7 and §10 below spend their length discussing), alongside weights
+for features that have since been dropped entirely. A stale formula inside the file designated the
+single source of truth is worse than no formula.
+
+The authoritative values are **`arena_weights.json`**, which also records `fit_alpha`, `fit_rows` and
+`fit_cards` — how it was actually fit. Note it serializes fewer entries than the fit has features:
+`WeightsFile.RoundWeights` drops any `|w| < 0.05`, so a handful of fitted-but-negligible features
+are absent by design rather than missing.
+
+## Stability and the deployment population
+
+A re-fit raised a question that turned out to matter more than the weights themselves: the
+coefficients move on every refit — 43 of 49 by >= 0.01 between two runs 90 minutes apart — so how
+much of that is signal? Findings below, in order of consequence, all reproducible offline with
+`dotnet run --project HdtArenaHelper.Training -- --offline`, which refits from the payload
+snapshot (added because until then a fit could not be re-run on identical bytes at all).
+
+### 1. `alpha = 10` was not regularizing anything
+
+`A = XcᵀW·Xc + alpha·I` was built with RAW `sqrt(games)` weights, never normalized. Measured:
+`mean(diag(A)) = 74166`, so the shrinkage factor was **1.4e-4** and the effective degrees of
+freedom **50.0 of 52**. It was unpenalized weighted OLS wearing a ridge's name — the same trap
+scikit-learn has, since it does not rescale `sample_weight` either. Fix: normalize the weights to
+mean 1, then choose alpha by cross-validation. Side effect worth recording: because the weight sum
+grows every week as games accumulate, the effective regularization had been silently drifting
+between refits.
+
+### 2. The refit is deterministic; the churn is entirely data
+
+Two refits on byte-identical snapshots produce identical weight files, so the movement is data
+change and not nondeterminism (dictionary ordering, Cholesky on a near-singular matrix). This had
+to be established before any statistic below meant anything.
+
+### 3. The honest cross-validated score is ~0.20, not 0.27
+
+Under CV grouped **by card** — a neutral card contributes one row per class, so a random row split
+leaks — with Spearman computed **within each class bucket** and averaged, because the product
+decision is "rank three cards of one class", the score is **0.1924** at 52 features. The
+previously reported ~0.27 was measured differently (pooled, not card-grouped) and was optimistic.
+The alpha curve is flat from 0.03 to 100 and then declines; the 1-SE rule picks 300.
+
+### 4. Half the features were noise, and removing them helped
+
+Coefficient drift scales as 1/sqrt(support): features on fewer than 40 rows drifted 0.133 on
+average versus 0.019 above 40, and the model's LARGEST coefficients sat on its smallest supports
+(`kw_forge` −2.92 from **3** cards, `kw_magnetic` −2.45 from 4, `tx_silence` +3.30 from 6).
+
+Power calculation for the threshold: detecting an effect worth a column (~1.0–1.5 points, given
+this source's blend weight) at 80% power and 0.05 with residual SD ~3 needs n >= 40–70. 40 also
+sits in a natural gap in the support distribution (35 → 51 → 100), so features do not flip in and
+out week to week. Dropping them took 52 → 31 fitted features and moved the score
+**0.1924 → 0.2024**, with the standard error halving (0.0065 → 0.0041).
+
+The reading that matters: **card-text semantics are not estimable at useful precision from this
+much data.** At an effect size of 0.5 points you would need 282 supporting rows, which almost
+nothing has. That is the same conclusion the earlier hand-tuned-keyword experiments reached,
+arriving this time from the variance side.
+
+### 5. Dropping `statline` was wrong, and cross-validation could not see it
+
+`statline` is emitted only for MINIONS, so it is `is_minion x (attack + health − 2·cost − 1)` — an
+interaction, not a plain linear combination, and its span needs per-type stat terms the model does
+not have. Removing it left the global attack/health slopes to absorb minion stat quality and they
+went **negative**. Cross-validated rho *improved* (0.2021) while a 2-mana 2/3 fell to 14.9/100:
+CV sees only cards the win-rate feeds cover, and the golden scores caught what it could not.
+Restoring per-type stat interactions (`attack_minion`, `health_minion`) is the way to revisit it.
+
+Corollary for the support floor: it applies only to `kw_*`/`tx_*` indicators. Dropping a
+structural/type dummy does not remove a noisy estimate, it removes the baseline offset for a card
+type that is still scored — `is_hero` has ONE supporting row, and dropping it moved Frost Lich
+Jaina 76.6 → 53.6 with `health = 30` left unoffset.
+
+### 6. The backstop does not work on the population it exists for
+
+This model only ever decides a pick for cards the win-rate feeds have no data for, yet it is
+fitted and validated on the cards that DO have data — the popular, well-sampled ones. Textbook
+covariate shift. Holding out the lowest-`games` decile of cards (the closest available proxy, and
+an optimistic one, since cards with *zero* data are further out) against a random holdout of the
+same size:
+
+| holdout (n=90 cards) | pooled Spearman |
+|---|---|
+| random cards | **0.2831** |
+| lowest-games decile | **0.0871** |
+| leave-one-set-out (4 largest sets) | 0.2446 – 0.3482 |
+
+Generalizing to an unseen *release* is fine. Thin data is not. Three explanations tested:
+
+- **Label noise** — partial. The two feeds agree 0.4289 on the thin decile versus 0.5738
+  elsewhere, so the target is genuinely noisier there. Disattenuating by sqrt(reliability):
+  **0.133 vs 0.374**. The gap survives.
+- **Range restriction** — ruled out, and in the opposite direction: the thin decile's target
+  spread is **larger** (sd 5.16 vs 3.51), not smaller.
+- **Real model failure** — confirmed. MAE **4.52 vs 2.48**. Against a spread of 5.16, predicting a
+  constant scores MAE ~4.1 (normal approximation), so on the thin decile the model is **no better
+  than a constant**.
+
+Consequence, implemented in `ScoreAggregator`: when no empirical source has a sample for a card,
+the blended score is shrunk toward 50 by `ModelOnlyShrink`. Shrinking is monotone, so the order
+among unmeasured cards is preserved; what it removes is their ability to outrank a well-sampled
+card on the strength of a guess. **Do not raise this source's blend weight to compensate** — the
+measurement says the opposite.
+
+**How that constant is derived — corrected.** It was first set to 0.35 from the ratio of the two
+disattenuated correlations above (0.133/0.374). That is not a shrink factor: a correlation is
+symmetric and unitless, while the question "the model claims +5, how much is real" is a REGRESSION
+SLOPE. Measured properly — held-out truth regressed on prediction, emitted every refit as
+`holdout_thin_calibration_slope` / `holdout_random_calibration_slope` / `model_only_shrink_measured`
+in `metrics.json`:
+
+| holdout | calibration slope |
+|---|---|
+| random cards | **0.9154** (se 0.157) |
+| lowest-games decile | **0.3102** |
+| ratio -> `ModelOnlyShrink` | **0.3388** |
+
+Two readings. First, the random-holdout slope sits at ~0.92, i.e. **in the measured regime the model
+is essentially well calibrated** — the ridge fit is not systematically over- or under-claiming, which
+is the sanity check that makes the thin-decile number interpretable. Second, the constant is the
+RATIO, not the raw thin slope: the display mapping was itself calibrated on the measured regime, so
+using 0.31 directly would apply that regime's calibration twice.
+
+The corrected value (0.34) is 0.011 away from the one the wrong derivation produced. **The number was
+right by accident; the reasoning was not.** Do not restore the correlation-ratio argument because its
+output looked fine. Given se 0.157 on the denominator, anything in 0.30-0.40 is indistinguishable
+here — re-derive from `metrics.json` at a refit, do not tune the third decimal.
+
+### 7. Per-coefficient sampling error (case bootstrap over cards)
+
+300 replicates, resampling **cards** and not rows: rows are correlated in groups of up to 11, so
+row-resampling would understate exactly these standard errors. Selected results at alpha=300:
+
+| feature | weight | se | ratio | sign consistency |
+|---|---|---|---|---|
+| `is_neutral` | −1.57 | 0.19 | 8.0 | 1.00 |
+| `tx_gain_card` | −1.00 | 0.23 | 4.3 | 1.00 |
+| `tx_summon` | +0.91 | 0.23 | 4.0 | 1.00 |
+| `attack` | −0.17 | 0.05 | 3.0 | 1.00 |
+| `is_hero` | −0.08 | 0.97 | 0.1 | **0.40** |
+| `tx_mana_cheat` | −0.03 | 0.34 | 0.1 | **0.51** |
+
+`is_hero` at sign consistency 0.40 means we cannot tell which direction the effect points — the
+quantitative form of limitation 5 below. Coefficients that do not clear twice their own standard
+error are listed in `metrics.json` as `unreliable_coefficients`.
+
+### 8. The display mapping normalizes scale, not just centre
+
+It was `50 + 15·(raw − median)`: 15 points per *raw unit*, with only the centre re-anchored per
+fit. The displayed spread therefore drifted with whatever raw scale a re-fit landed on, which is
+why golden scores swung on refits that had barely changed the model. The trainer now also ships
+`anchor_sigma_raw` (1.4826 × MAD of the pool's raw scores) and the mapping divides by it, so
+"+15 points per robust SD" is finally what happens rather than what the comment claimed. The slope
+stays deliberately below the win-rate sources' ~+35 so a real win-rate outvotes this backstop on
+disagreement.
+
+**Measured caveat: this did not reduce today's volatility.** The pool's robust sigma is ~0.95, so
+dividing by it is nearly a no-op right now, and the bootstrap noise floor moved only 17.71 → 16.71
+display points. It is a correctness fix against future scale drift, not a variance fix. The
+volatility is coefficient sampling error amplified by the slope — **p95 ~17 display points per
+card** under resampling — which is a reason to distrust this source, not to re-tune the mapping.
+
+### 9. Release gate, and why it cannot be calibrated statistically
+
+`metrics.json` (written per run) replaces byte-comparing the weights file and scraping the console
+log; the latter was culture-dependent ("0,44" vs "0.44") and would have mis-parsed silently one
+day. The gate decides on the **same-class pick-flip rate**: the share of random same-class triples
+whose recommended card changes. That is the right statistic — it is what a user would notice, and
+raw coefficient deltas mix units (0.15 on the attack slope is a catastrophe, the same move on a
+3-support keyword is nothing).
+
+The threshold should be the bootstrap null: what resampling the same cards produces by itself.
+**It cannot be, and that is a finding rather than a tooling problem.** Three independent statistics
+were tried and all agree the model's output is too unstable to gate on:
+
+| statistic | noise floor under resampling |
+|---|---|
+| max abs weight delta | 0.23–0.53 (mixed units, below the shipped rounding — meaningless) |
+| p95 per-card display shift | ~17 of 100 points |
+| same-class pick-flip rate | **31.4% of picks** |
+
+The pick-flip version was expected to be much tighter, because two cards scored by one fit share
+their coefficient error and it should largely cancel in the comparison between them. It did not.
+And the flips are **not** confined to near-ties, which would have made them harmless:
+
+| model's winner leads by | share of those picks that flip |
+|---|---|
+| > 0 pts | 31.4% |
+| > 3 pts | 25.5% |
+| > 5 pts | 22.0% |
+| **> 10 pts** | **15.1%** |
+
+Even where the heuristic claims a winner by more than 10 display points — two thirds of a robust SD
+— resampling the training cards reverses that recommendation 15% of the time. The model reorders
+cards it claims to distinguish clearly. (Caveat on the magnitude: a case bootstrap leaves ~37% of
+cards out of each replicate, so this is "had we learned from a different sample of arena cards",
+which is the right notion of estimation uncertainty but a substantial perturbation.)
+
+So the gate ships with an **absolute** threshold (2% of picks changed) and the bootstrap floor is
+reported, not enforced — calibrating on a 31% floor would mark every real refit "not material" and
+silently keep stale weights, which is worse than PR noise. **The fix is a stabler model, not a
+fourth statistic.**
+
+### Open, in priority order
+
+1. Per-type stat interactions (`attack_minion`, `health_minion`), rarity as dummies, and a decision
+   on hero cards (one supporting row — arguably the runtime should decline to score them rather
+   than pretend).
+2. Reduce per-card variance, or reduce this source's authority further. Given 6 and 7, the second
+   is the honest option.
+3. Only then calibrate the output-space gate on the bootstrap null.
+
+### 10. Tried and rejected: per-type stat slopes, rarity dummies, zeroed hero health
+
+The obvious reading of 5 was that one attack/health slope shared across every card type is what
+let those coefficients go negative, so the fix would be per-type interactions. Implemented all
+three candidate changes together (`attack_minion` = is_minion x attack, `health_minion`, rarity as
+`is_rare`/`is_epic`/`is_legendary` dummies instead of an ordinal, and hero `health` zeroed so
+`is_hero` carries the level) and measured. Every number got worse:
+
+| metric | committed | with the changes |
+|---|---|---|
+| CV within-class rho (1-SE alpha) | 0.2009 | 0.1982 |
+| lowest-games holdout rho | 0.0871 | 0.0638 |
+| ... disattenuated | 0.133 | 0.0975 |
+| covariate-shift gap | −0.196 | −0.227 |
+| thin MAE | 4.52 | 4.51 |
+
+And the interactions did not do what they were supposed to: for a minion the total attack slope is
+`attack` −0.11 + `attack_minion` −0.09 = −0.20, i.e. the same negative value as before, merely
+split across two terms. Zeroing hero health moved the whole 30-health effect into `is_hero`, taking
+it from −0.08 to **−3.66 +/- 1.76** (sign consistency 0.65) — one supporting row now carrying a
+large, unreliable coefficient instead of a small one.
+
+Reverted. The lesson is about interpretation, not about the features: with `statline`
+(= attack + health − 2·cost − 1), `stat_per_mana`, `cost`, `attack` and `health` all in the model,
+the individual stat coefficients are not interpretable — you cannot hold `statline` fixed while
+varying `attack`. Their signs are an artifact of the parameterization, not a defect to chase, and
+only the total predicted effect (what CV measures) means anything. A future attempt here should
+change the parameterization wholesale (pick raw OR derived, plus cost bucket dummies) and be
+judged on the thin-decile holdout, not on whether the printed signs look sensible.
+
+### 11. A class's real arena win-rate IS recoverable from per-card data (validated cross-source)
+
+The hero pick used to show only the pool-quality tier: the unweighted mean of a class's shrunk
+per-card drawn rates, normalized 0-100. Useful for ranking, but not interpretable — "71/100" says
+nothing a player can check. A win-rate in percentage points does.
+
+Estimator, one per source, from payloads we already fetch:
+
+- HSReplay: `Σ num_games·win_rate / Σ num_games` over the class bucket, using INCLUSION `win_rate`
+  (not the drawn rate the card scores use). Summing "games where the card was in the deck" x "their
+  win-rate" counts every game once per card it contained, which is a deck-level rate.
+- Firestone: `Σ decksWithCardThenWin / Σ decksWithCard` over the class file.
+
+**Both need the same correction, and the bias is structural, not noise.** The pooled rate comes out
+at **53.37%** (HSReplay) and **55.56%** (Firestone) where a true average win-rate must be 50 — in
+arena a winning deck keeps playing (up to 12 wins) while a losing one stops at 3, so weighting by
+games oversamples winning decks. Subtracting each source's own pooled offset removes it; only the
+offset, never the spread.
+
+Re-centred, the two independent sources agree within ~2pp with identical ordering, and land within
+~3pp of the figures HDT's paid helper displays for the three classes we could observe:
+
+| class | HSReplay | Firestone | Arenasmith (observed) |
+|---|---|---|---|
+| Demon Hunter | 54.6 | 55.2 | — |
+| Paladin | 52.7 | 51.6 | **52** |
+| Hunter | 50.8 | 50.0 | — |
+| Mage | 49.5 | 49.0 | — |
+| Priest | 49.1 | 48.7 | — |
+| Death Knight | 45.0 | 47.0 | — |
+| Warlock | 44.1 | 44.4 | — |
+| Shaman | 41.9 | 41.0 | **39** |
+| Rogue | 39.1 | 40.2 | **36** |
+| Druid | 35.7 | 36.4 | — |
+| Warrior | 28.5 | 28.2 | — |
+
+**It is displayed, NOT blended into the score**, and that is a measured decision: Spearman between
+the pool-quality tier and this win-rate is **0.9636** — over 11 classes only Hunter (5th→3rd) and
+Priest (3rd→5th) move at all. The proxy was already ranking the classes correctly, so folding the
+win-rate into the score would buy ~0.04 of correlation at the price of a hand-derived re-centring
+constant inside the scoring path. It earns its place as a label and nothing more.
+
+Not recoverable: the **pick rate** ("Picked 57%"). Neither source publishes selection frequency.
+Do not attempt to infer it from `popularity`, which is inclusion-in-deck, a different quantity.
+
+### 12. Tribe availability is per-CLASS, and the dead-card lever was ignoring it
+
+The dead-card penalty fires when a tribal payoff is drafted with none of its tribe. It was
+class-blind, which charges the same penalty to a Warlock offered a Demon payoff and to a Paladin —
+two very different situations. Measured from the same HSReplay per-class payload we already fetch,
+popularity-weighted (popularity IS "% of that class's decks that ran the card", so it reads directly
+as a share of deck slots), amalgams excluded so it matches what the engine accepts as a member:
+
+| class | Beast | Undead | Dragon | Elemental | Demon | Mech | Murloc | Naga |
+|---|---|---|---|---|---|---|---|---|
+| Death Knight | 5.23 | **27.22** | 2.54 | 3.18 | 2.69 | 1.83 | 1.73 | 0.40 |
+| Demon Hunter | 6.52 | 2.88 | 2.07 | 2.52 | 12.97 | 1.52 | 1.35 | 4.11 |
+| Druid | 13.61 | 2.45 | 6.23 | 2.88 | 0.72 | 2.14 | 1.29 | 0.41 |
+| Hunter | **23.26** | 2.48 | *1.72* | 2.49 | 0.57 | 2.34 | 1.27 | 1.85 |
+| Mage | 3.75 | 1.86 | 4.00 | 10.40 | 1.96 | 4.27 | 1.01 | 1.95 |
+| Paladin | 9.09 | 4.18 | 3.96 | 3.85 | *0.60* | 7.52 | 2.96 | 0.35 |
+| Priest | 3.19 | 6.89 | 7.61 | 3.91 | 0.58 | *1.25* | 0.75 | 0.66 |
+| Rogue | 4.93 | 4.54 | 3.46 | 3.00 | 1.97 | 4.47 | 1.28 | 0.44 |
+| Shaman | 6.85 | *1.77* | 5.21 | **11.51** | 0.73 | 3.48 | 1.48 | 1.59 |
+| Warlock | 5.09 | 4.55 | 7.76 | 2.84 | **16.55** | 1.81 | 1.31 | 0.41 |
+| Warrior | 6.31 | 1.90 | **8.95** | 3.42 | 2.48 | 8.23 | 1.31 | 0.44 |
+
+Spreads of 5-28x (Demon: Warlock 16.55 vs Paladin 0.60; Undead: DK 27.22 vs Shaman 1.77), so this
+is a real class-level signal, not noise. **It also refutes the hypothesis that prompted the work**:
+the guess was that Priest is a poor home for a Dragon payoff — measured, Priest is the *3rd best*
+Dragon class at 7.61%. The genuinely dead cases are Hunter (1.72%) and Demon Hunter (2.07%).
+Guessing which class lacks which tribe does not work; the table does.
+
+**How it is used.** The penalty is scaled by the members the remaining picks are expected to bring,
+`share x picksLeft`, against the couple a payoff needs to switch on. The direction is deliberately
+one-way — availability can only REDUCE the penalty, never deepen it — because this is the single
+lever allowed past the fuzzy clamp and nothing measured here justifies making it more aggressive.
+A floor stops the factor going negative, which would otherwise flip the penalty into a bonus that
+GROWS with availability. Missing data (class unknown, feed not loaded, tribe unseen) reproduces the
+class-blind behaviour exactly, and a test pins that.
+
+**Still not validated end-to-end**, and it cannot be with public data: there is no per-deck dataset
+to check whether damping the penalty improves picks. What changed is the INPUT — measured per-patch
+availability instead of an implicit "every class runs every tribe equally", which the table shows is
+false by up to 28x. The bound and the one-way direction remain the guardrail.
 
 ## Known limitations
+
 1. Target = win-rate of the deck that includes the card: correlational, not causal (draft
    bias, player skill, synergies).
 2. Noise ceiling 0.47-0.53 between sources: rho 0.26-0.27 is ~55% of the achievable maximum.

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\Version.props" Condition="Exists('..\Version.props')" />
+
+  <!--
+    Pure numerics: the ridge solver and the descriptive statistics, with NO reference to HDT,
+    HearthDb or HearthMirror. That is the whole point of the project — everything here is
+    testable on a machine that has never installed Hearthstone Deck Tracker, which is not true
+    of any other project in this solution. Do NOT add an HSDT.props import or an HDT Reference
+    here; if something needs card metadata it belongs in the plugin, not in this library.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>HdtArenaHelper.Numerics</AssemblyName>
+    <RootNamespace>HdtArenaHelper.Numerics</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+  </ItemGroup>
+
+</Project>

@@ -55,6 +55,9 @@ namespace HdtArenaHelper
 		// (otherwise the backstop is silently dead and IsLoaded would lie about it).
 		public bool IsLoaded => _byDbfId != null;
 
+		/// <summary>Model-based: it scores every card from metadata, with no sample behind it.</summary>
+		public bool HasSamples => false;
+
 		public Task EnsureLoadedAsync()
 		{
 			EnsureMap();
@@ -97,10 +100,24 @@ namespace HdtArenaHelper
 			try { raw = Model.Score(BuildFeatures(card)); }
 			catch { return null; }
 
-			// Display mapping onto the 0-100 blend scale: the median draftable card maps
-			// to 50 (the trainer measures the pool median and ships it in the json as
-			// anchor_median_raw), each win-rate point is worth 15.
-			return new SourceScore(Clamp(50 + 15 * (raw - Model.AnchorMedianRaw)));
+			// Display mapping onto the 0-100 blend scale: the median draftable card maps to 50,
+			// and one ROBUST SD of the pool's raw spread is worth PointsPerRobustSd points. Both
+			// the centre and the scale are measured by the trainer and shipped in the json.
+			//
+			// The scale is the load-bearing part. A fixed slope on the RAW score (what this used
+			// to be) means the displayed spread drifts with every re-fit: heavier regularization
+			// shrinks the raw predictions, and the same +/-15 per raw unit then covers a different
+			// number of standard deviations. Measured by bootstrap, ~1 point of raw coefficient
+			// wobble became ~15 display points, which is also why the golden scores used to swing
+			// on refits that had barely changed the model. Dividing by the pool's robust sigma
+			// makes the display invariant to the raw scale, so "+15 per robust SD" is finally what
+			// happens rather than what the comment claimed.
+			//
+			// It stays deliberately SHALLOWER than the win-rate sources (~+35 per robust SD): on
+			// disagreement the real win-rate must dominate even at equal blend weight, because
+			// this source is a backstop. Do not raise it to match them.
+			return new SourceScore(Clamp(
+				50 + PointsPerRobustSd * (raw - Model.AnchorMedianRaw) / Model.AnchorSigmaRaw));
 		}
 
 		/// <summary>
@@ -117,8 +134,12 @@ namespace HdtArenaHelper
 			var cost = card.Cost;
 			var attack = card.Attack;
 			// HearthstoneJSON (the training source) stores weapon durability in its own
-			// field; HearthDb mirrors it in Durability. Hero cards keep their 30 health:
-			// the training saw the same, so the is_hero weight was fit net of that.
+			// field; HearthDb mirrors it in Durability.
+			//
+			// Hero cards keep their literal 30 health: the training saw the same, so the is_hero
+			// weight is fit net of it. Zeroing it and letting is_hero carry the level was TRIED and
+			// measured worse - it concentrates the whole effect into a coefficient with one
+			// supporting row (is_hero went -0.08 -> -3.66 +/- 1.76). See REPORT.md.
 			var health = card.Type == CardType.WEAPON && card.Durability != 0
 				? card.Durability
 				: card.Health;
@@ -153,8 +174,9 @@ namespace HdtArenaHelper
 			if(card.Class == CardClass.NEUTRAL)
 				f["is_neutral"] = 1;
 
-			// rarity_ord is the ordinal (rare=1, epic=2, legendary=3); legendaries carry
-			// an extra is_legendary term, matching the training feature set.
+			// rarity_ord is the ordinal (rare=1, epic=2, legendary=3); legendaries carry an extra
+			// is_legendary term. Splitting this into one dummy per rarity was TRIED and measured
+			// no better (see REPORT.md), so the simpler committed encoding stands.
 			switch(card.Rarity)
 			{
 				case Rarity.RARE: f["rarity_ord"] = 1; break;
@@ -234,18 +256,32 @@ namespace HdtArenaHelper
 			return Markup.Replace(text, " ").ToLowerInvariant();
 		}
 
-		private static bool Has(string text, string pattern) => Regex.IsMatch(text, pattern);
+		// BuildFeatures runs ~33 distinct patterns per card and is called per card per score, but
+		// the static Regex.IsMatch cache holds only 15 entries — so every feature extraction used
+		// to evict and re-PARSE nearly every pattern. Compile each one once instead; the pattern
+		// strings are untouched, so no feature (and no golden score) can move.
+		private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> Compiled =
+			new System.Collections.Concurrent.ConcurrentDictionary<string, Regex>();
+
+		private static Regex Pattern(string pattern)
+			=> Compiled.GetOrAdd(pattern, p => new Regex(p, RegexOptions.Compiled));
+
+		private static bool Has(string text, string pattern) => Pattern(pattern).IsMatch(text);
 
 		private static int MaxNumber(string text, string pattern)
 		{
 			var max = 0;
-			foreach(Match m in Regex.Matches(text, pattern))
+			foreach(Match m in Pattern(pattern).Matches(text))
 			{
 				if(int.TryParse(m.Groups[1].Value, out var n) && n > max)
 					max = n;
 			}
 			return max;
 		}
+
+		/// <summary>Display points per robust SD of the pool's raw spread. Deliberately well below
+		/// the win-rate sources' ~35 so a solid win-rate outvotes this backstop on disagreement.</summary>
+		private const double PointsPerRobustSd = 15.0;
 
 		private static double Clamp(double v) => Math.Max(0, Math.Min(100, v));
 	}
@@ -268,14 +304,22 @@ namespace HdtArenaHelper
 		/// </summary>
 		public double AnchorMedianRaw { get; }
 
+		/// <summary>
+		/// Robust SD (1.4826 x MAD) of the draftable pool's raw scores, measured by the trainer at
+		/// fit time. The display mapping divides by it so the 0-100 spread is a property of the
+		/// pool rather than of whatever scale this particular re-fit happened to land on.
+		/// </summary>
+		public double AnchorSigmaRaw { get; }
+
 		public double this[string feature]
 			=> _weights.TryGetValue(feature, out var v) ? v : 0.0;
 
-		private ArenaWeights(double intercept, double anchorMedianRaw,
+		private ArenaWeights(double intercept, double anchorMedianRaw, double anchorSigmaRaw,
 			IReadOnlyDictionary<string, double> weights)
 		{
 			Intercept = intercept;
 			AnchorMedianRaw = anchorMedianRaw;
+			AnchorSigmaRaw = anchorSigmaRaw > 1e-9 ? anchorSigmaRaw : 1.0;
 			_weights = weights;
 		}
 
@@ -302,16 +346,20 @@ namespace HdtArenaHelper
 						var root = JObject.Parse(reader.ReadToEnd());
 						var intercept = (double?)root["intercept"] ?? 0.0;
 						var anchor = (double?)root["anchor_median_raw"] ?? 0.0;
+						// Absent in weight files written before the display scale was measured:
+						// 1.0 reproduces the old fixed-slope behaviour exactly rather than
+						// silently rescaling every score.
+						var sigma = (double?)root["anchor_sigma_raw"] ?? 1.0;
 						var weights = root["weights"]?.ToObject<Dictionary<string, double>>()
 							?? new Dictionary<string, double>();
-						return new ArenaWeights(intercept, anchor, weights);
+						return new ArenaWeights(intercept, anchor, sigma, weights);
 					}
 				}
 			}
 			catch(Exception ex)
 			{
 				Hearthstone_Deck_Tracker.Utility.Logging.Log.Error("[ArenaHelper] weights load failed: " + ex);
-				return new ArenaWeights(0.0, 0.0, new Dictionary<string, double>());
+				return new ArenaWeights(0.0, 0.0, 1.0, new Dictionary<string, double>());
 			}
 		}
 	}

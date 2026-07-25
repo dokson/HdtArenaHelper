@@ -88,6 +88,28 @@ namespace HdtArenaHelper
 	/// </summary>
 	public class ScoreAggregator
 	{
+		/// <summary>The score a card with no information maps to (the plaque's midpoint).</summary>
+		public const double NeutralScore = 50.0;
+
+		/// <summary>
+		/// Fraction of a model-only score's deviation from <see cref="NeutralScore"/> that is kept
+		/// when no empirical sample backs the card.
+		///
+		/// Measured as a REGRESSION SLOPE, which is the only thing a shrink factor can come from:
+		/// regress held-out truth on the model's prediction and the slope is how much of a claimed
+		/// deviation is real. On the thinnest-sampled decile that slope is 0.31, against 0.92 on a
+		/// random holdout — the regime the display mapping was calibrated on — so the constant is
+		/// the ratio, 0.34. Emitted every refit as `model_only_shrink_measured` in `metrics.json`;
+		/// re-derive it there rather than reasoning about it.
+		///
+		/// The value barely moved (it was 0.35), but the ORIGINAL derivation was wrong: it divided
+		/// two rank correlations, which is not a slope and answers a different question. Do not
+		/// restore that reasoning just because the number it produced happened to land close.
+		/// The random-holdout slope carries se 0.16, so anything in 0.30-0.40 is indistinguishable
+		/// here — do not chase the third decimal between refits.
+		/// </summary>
+		public const double ModelOnlyShrink = 0.34;
+
 		private readonly List<IArenaDataSource> _sources;
 		private ISynergyEngine? _synergyEngine;
 
@@ -121,23 +143,66 @@ namespace HdtArenaHelper
 		public BlendedScore Score(int dbfId, IReadOnlyCollection<int> draftedDbfIds,
 			CardClass draftClass = CardClass.INVALID)
 		{
-			var components = new List<ScoreComponent>();
-			double weightedSum = 0;
-			double weightTotal = 0;
-
+			var rated = new List<(IArenaDataSource Source, SourceScore Score)>(_sources.Count);
 			foreach(var source in _sources)
 			{
-				var rated = source.GetNormalizedScore(dbfId, draftClass);
-				if(rated == null)
+				var score = source.GetNormalizedScore(dbfId, draftClass);
+				if(score != null)
+					rated.Add((source, score.Value));
+			}
+
+			// Per-card precision weighting: scale each EMPIRICAL source's configured weight by its
+			// sample confidence, using the same n/(n+k) factor the shrinkage applies — a 5000-game
+			// estimate must not average 50/50 against a 30-game one.
+			//
+			// Model-based sources (no sample) must then lose the SAME fraction collectively, or the
+			// blend silently hands them authority as the real evidence thins: with the heuristic
+			// held at its full configured weight, its share of a 0.5/0.5/0.5 blend went from the
+			// intended 33% to 50% at 60 games and 67% at 20 — and the holdout measurements say the
+			// heuristic is at its WORST exactly on thinly-sampled cards. Scaling it by the
+			// empirical sources' collective confidence keeps the configured ratio at every sample
+			// size, so thin data can never promote the model.
+			// The denominator is every empirical source's CONFIGURED weight, whether or not it
+			// rated THIS card — not just the ones that did. Using only the raters reopened the same
+			// hole from the other side: a card covered by one feed instead of two halved the
+			// denominator and pushed the model's share from a third to a half, and single-feed
+			// coverage correlates with exactly the obscure, thin cards where the model is worst.
+			// A source with no data for a card must lower confidence, never promote the model.
+			double empiricalConfigured = 0, empiricalEffective = 0;
+			foreach(var source in _sources)
+			{
+				if(!source.HasSamples)
 					continue;
-				// Per-card precision weighting: scale the source's configured weight by
-				// its sample confidence, using the same n/(n+k) factor the shrinkage
-				// applies — a 5000-game estimate must not average 50/50 against a
-				// 30-game one. Model-based sources (no sample) keep their full weight:
-				// their trust already lives in the configured weight.
-				var weight = source.Weight * Confidence(rated.Value.Games);
-				components.Add(new ScoreComponent(source.Name, rated.Value.Score, weight, rated.Value.Games));
-				weightedSum += rated.Value.Score * weight;
+				empiricalConfigured += source.Weight;
+				// A feed with no row for this card contributes nothing to the numerator: it is
+				// missing evidence, which must lower confidence rather than hand weight elsewhere.
+				var covered = rated.Any(r => ReferenceEquals(r.Source, source));
+				if(covered)
+				{
+					var games = rated.First(r => ReferenceEquals(r.Source, source)).Score.Games;
+					empiricalEffective += source.Weight * Confidence(games);
+				}
+			}
+			// When NO empirical source has anything for this card, the model is all there is: the
+			// factor must be 1 so it can still score (the shrink below then bounds what it claims).
+			// Scaling it to 0 here — as a first attempt at closing the coverage hole did — zeroes
+			// the only remaining weight, so weightTotal hits 0, the card returns BlendedScore.Empty
+			// and shows as "—". That silently removed the backstop from exactly the new and obscure
+			// cards it exists for, and made the shrink below unreachable in the shipped wiring.
+			var modelFactor = empiricalConfigured > 0 && empiricalEffective > 0
+				? empiricalEffective / empiricalConfigured
+				: 1.0;
+
+			var components = new List<ScoreComponent>(rated.Count);
+			double weightedSum = 0;
+			double weightTotal = 0;
+			foreach(var (source, score) in rated)
+			{
+				var weight = score.Games == null
+					? source.Weight * modelFactor
+					: source.Weight * Confidence(score.Games);
+				components.Add(new ScoreComponent(source.Name, score.Score, weight, score.Games));
+				weightedSum += score.Score * weight;
 				weightTotal += weight;
 			}
 
@@ -146,7 +211,33 @@ namespace HdtArenaHelper
 
 			var baseScore = weightedSum / weightTotal;
 
-			var synergy = _synergyEngine?.GetSynergy(dbfId, draftedDbfIds) ?? default;
+			// When NO empirical source has a sample for this card, the score rests entirely on
+			// the offline model — and that is measured to be the one place it does not work.
+			// Backtested on a held-out decile of thinnest-sampled cards (the closest available
+			// proxy for "no data at all", and an optimistic one): rank correlation 0.09 vs 0.28
+			// on a random holdout, and MAE 4.5 against a target spread of 5.2 — i.e. no better
+			// than predicting a constant. Neither label noise nor range restriction explains it
+			// (the two win-rate feeds still agree 0.43 there, and the thin group's spread is
+			// LARGER, not smaller).
+			//
+			// So shrink an unmeasured card's score toward neutral instead of letting the model
+			// state a confident number it cannot support. Shrinking is monotone, so the ordering
+			// AMONG unmeasured cards is untouched — what it removes is their ability to outrank a
+			// well-sampled card on the strength of a guess. The overlay already flags these as
+			// low confidence; this stops them merely LOOKING uncertain while scoring as if sure.
+			var hasSample = false;
+			foreach(var c in components)
+			{
+				if(c.Games.HasValue)
+				{
+					hasSample = true;
+					break;
+				}
+			}
+			if(!hasSample)
+				baseScore = NeutralScore + (baseScore - NeutralScore) * ModelOnlyShrink;
+
+			var synergy = _synergyEngine?.GetSynergy(dbfId, draftedDbfIds, draftClass) ?? default;
 			var value = System.Math.Max(0, System.Math.Min(100, baseScore + synergy.Bonus));
 
 			return new BlendedScore(value, components, synergy.Bonus, synergy.TopReason);

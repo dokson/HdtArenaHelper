@@ -46,7 +46,8 @@ namespace HdtArenaHelper
 	/// A realistic browser User-Agent is required or Cloudflare serves a challenge.
 	/// Cached with a 1-day TTL.
 	/// </summary>
-	public class HsReplayArenaDataSource : IArenaDataSource
+	public class HsReplayArenaDataSource : IArenaDataSource, IClassWinRateSource,
+		IClassTribeAvailabilitySource
 	{
 		private const string Endpoint =
 			"https://hsreplay.net/api/v1/arena/card_stats/free/?format=json";
@@ -74,6 +75,8 @@ namespace HdtArenaHelper
 			public Dictionary<int, ArenaCardScore> Raw { get; }
 			public Dictionary<int, SourceScore> CardScore { get; }   // dbfId -> score+games (ALL bucket)
 			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100 (tier list)
+			public Dictionary<CardClass, double> ClassWinRate { get; } // class -> estimated win-rate %
+			public Dictionary<CardClass, Dictionary<Race, double>> ClassTribeShare { get; } // class -> race -> %
 			public Dictionary<CardClass, Dictionary<int, SourceScore>> ClassCardScore { get; }
 			public Dictionary<int, CardClass> HeroClass { get; }     // hero-skin dbfId -> class
 
@@ -81,12 +84,16 @@ namespace HdtArenaHelper
 				Dictionary<int, ArenaCardScore> raw,
 				Dictionary<int, SourceScore> cardScore,
 				Dictionary<CardClass, double> classScore,
+				Dictionary<CardClass, double> classWinRate,
+				Dictionary<CardClass, Dictionary<Race, double>> classTribeShare,
 				Dictionary<CardClass, Dictionary<int, SourceScore>> classCardScore,
 				Dictionary<int, CardClass> heroClass)
 			{
 				Raw = raw;
 				CardScore = cardScore;
 				ClassScore = classScore;
+				ClassWinRate = classWinRate;
+				ClassTribeShare = classTribeShare;
 				ClassCardScore = classCardScore;
 				HeroClass = heroClass;
 			}
@@ -105,6 +112,9 @@ namespace HdtArenaHelper
 		public double Weight { get; }
 		public bool IsLoaded => _data != null;
 
+		/// <summary>Real arena win-rates: every score carries the games behind it.</summary>
+		public bool HasSamples => true;
+
 		/// <summary>Raw per-card stats (drawn win-rate, popularity, games), if loaded.</summary>
 		public ArenaCardScore? GetRaw(int dbfId)
 		{
@@ -114,6 +124,18 @@ namespace HdtArenaHelper
 
 		/// <summary>Per-class 0-100 tier scores (the hero-pick tier list), if loaded.</summary>
 		public IReadOnlyDictionary<CardClass, double>? ClassScores => _data?.ClassScore;
+
+		/// <summary>Per-class estimated arena win-rate in percentage points, if loaded.</summary>
+		public IReadOnlyDictionary<CardClass, double>? ClassWinRates => _data?.ClassWinRate;
+
+		/// <inheritdoc/>
+		public double? TribeShare(CardClass cls, Race race)
+		{
+			var data = _data;
+			if(data == null || !data.ClassTribeShare.TryGetValue(cls, out var byRace))
+				return null;
+			return byRace.TryGetValue(race, out var share) ? share : (double?)null;
+		}
 
 		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
 		{
@@ -219,6 +241,8 @@ namespace HdtArenaHelper
 			var classScores = classTier.Count == 0
 				? new Dictionary<CardClass, double>()
 				: ScoreMath.ToScores(classTier);
+			var classWinRates = ParseClassWinRates(json!);
+			var classTribeShares = ParseClassTribeShares(json!);
 			var heroClass = HeroSkins.BuildClassMap();
 
 			// The games behind each ALL score travel with it, so the blend can weight
@@ -227,7 +251,8 @@ namespace HdtArenaHelper
 				e => e.Key, e => new SourceScore(e.Value, raw[e.Key].Games));
 
 			// Publish all maps at once through the single volatile reference.
-			_data = new Data(raw, cardScore, classScores, classCardScore, heroClass);
+			_data = new Data(raw, cardScore, classScores, classWinRates, classTribeShares,
+				classCardScore, heroClass);
 			Log($"loaded {raw.Count} cards, {classScores.Count} class tiers, {heroClass.Count} hero skins (source: {source})");
 		}
 
@@ -465,6 +490,119 @@ namespace HdtArenaHelper
 				Log($"class bucket parse failed: {ex.Message}");
 			}
 			return result;
+		}
+
+		/// <summary>
+		/// Per-class tribe availability: for each class, the share of its deck slots (popularity,
+		/// which is exactly "% of that class's decks that ran the card") held by each tribe.
+		///
+		/// `popularity` is the right weight and `num_games` is not: the question is how much of a
+		/// DECK is made of this tribe, not how many games those cards were involved in.
+		///
+		/// Amalgams (<see cref="Race.ALL"/>) are deliberately NOT counted for every tribe here, so
+		/// availability is consistent with what the synergy engine accepts as a genuine member —
+		/// counting them would report Murlocs as available to a class whose only "Murloc" is an
+		/// amalgam, which is the same double-count that once disarmed the dead-card penalty.
+		/// </summary>
+		private static Dictionary<CardClass, Dictionary<Race, double>> ParseClassTribeShares(string json)
+		{
+			var result = new Dictionary<CardClass, Dictionary<Race, double>>();
+			try
+			{
+				var data = JObject.Parse(json)["data"] as JObject;
+				if(data == null)
+					return result;
+
+				foreach(var prop in data.Properties())
+				{
+					if(prop.Name == "ALL" || !(prop.Value is JArray bucket))
+						continue;
+					if(!Enum.TryParse<CardClass>(prop.Name, ignoreCase: true, out var cls))
+						continue;
+
+					var byRace = new Dictionary<Race, double>();
+					double total = 0;
+					foreach(var card in bucket)
+					{
+						var cardId = (string?)card["card_id"];
+						if(string.IsNullOrEmpty(cardId))
+							continue;
+						if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard))
+							continue;
+						var popularity = (double?)card["popularity"] ?? 0;
+						if(popularity <= 0)
+							continue;
+
+						total += popularity;
+						// Both races of a dual-tribe card count: it IS a member of each.
+						foreach(var race in new[] { dbCard.Race, dbCard.SecondaryRace })
+						{
+							if(race == Race.INVALID || race == Race.ALL)
+								continue;
+							byRace.TryGetValue(race, out var seen);
+							byRace[race] = seen + popularity;
+						}
+					}
+					if(total <= 0 || byRace.Count == 0)
+						continue;
+					result[cls] = byRace.ToDictionary(kv => kv.Key, kv => 100.0 * kv.Value / total);
+				}
+			}
+			catch(Exception ex)
+			{
+				Log($"class tribe share parse failed: {ex.Message}");
+				return new Dictionary<CardClass, Dictionary<Race, double>>();
+			}
+			return result;
+		}
+
+		/// <summary>
+		/// Per-class estimated arena win-rate, in percentage points. Uses INCLUSION
+		/// <c>win_rate</c> weighted by <c>num_games</c>, not the drawn rate the card scores use:
+		/// the target here is a whole deck's win-rate, and summing "games where this card was in
+		/// the deck" x "win-rate of those games" over a class's cards recovers exactly that
+		/// (each game counted once per card it contained). Unfiltered by
+		/// <see cref="ScoreMath.MinGames"/> on purpose — a thin card contributes proportionally
+		/// few games, so it cannot pull the pooled estimate.
+		/// </summary>
+		private static Dictionary<CardClass, double> ParseClassWinRates(string json)
+		{
+			var tallies = new Dictionary<CardClass, (double Wins, double Games)>();
+			try
+			{
+				var data = JObject.Parse(json)["data"] as JObject;
+				if(data == null)
+					return new Dictionary<CardClass, double>();
+
+				foreach(var prop in data.Properties())
+				{
+					// Skip ALL: it is the same games again, and including it would drag every
+					// class's offset toward the pool it is supposed to be measured against.
+					if(prop.Name == "ALL" || !(prop.Value is JArray bucket))
+						continue;
+					if(!Enum.TryParse<CardClass>(prop.Name, ignoreCase: true, out var cls))
+						continue;
+
+					double wins = 0, games = 0;
+					foreach(var card in bucket)
+					{
+						var rate = (double?)card["win_rate"];
+						var n = (int?)card["num_games"] ?? 0;
+						if(rate == null || n <= 0)
+							continue;
+						wins += n * rate.Value / 100.0;
+						games += n;
+					}
+					if(games > 0)
+						tallies[cls] = (wins, games);
+				}
+			}
+			catch(Exception ex)
+			{
+				Log($"class win-rate parse failed: {ex.Message}");
+				return new Dictionary<CardClass, double>();
+			}
+			return ScoreMath.RecentreClassWinRates(tallies);
 		}
 
 		/// <summary>

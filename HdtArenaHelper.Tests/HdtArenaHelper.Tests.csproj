@@ -23,7 +23,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HdtArenaHelper\HdtArenaHelper.csproj" />
-    <ProjectReference Include="..\HdtArenaHelper.Training\HdtArenaHelper.Training.csproj" />
   </ItemGroup>
 
   <!--

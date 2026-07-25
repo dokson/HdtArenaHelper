@@ -26,16 +26,16 @@ namespace HdtArenaHelper.Tests
 		/// re-running the trainer and reading the scores.
 		/// </summary>
 		[Theory]
-		[InlineData("LOOT_413", 35.70)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 39.73)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 33.83)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 49.55)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 49.43)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 33.65)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 51.05)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 57.65)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 24.29)]  // Dark Iron Dwarf - conditional buff
-		[InlineData("NEW1_030", 11.52)] // Deathwing - near the floor
+		[InlineData("LOOT_413", 18.38)] // Plated Beetle - vanilla-ish minion
+		[InlineData("CS2_189", 36.17)]  // Elven Archer - battlecry damage
+		[InlineData("EX1_093", 34.98)]  // Defender of Argus - buff + taunt text
+		[InlineData("CS2_106", 50.95)]  // Fiery War Axe - weapon path
+		[InlineData("CS2_029", 51.07)]  // Fireball - spell with damage magnitude
+		[InlineData("EX1_050", 33.09)]  // Coldlight Oracle - draw text
+		[InlineData("GIL_828", 53.16)]  // Dire Frenzy - buff spell
+		[InlineData("CS2_235", 51.11)]  // Northshire Cleric - persistent draw
+		[InlineData("EX1_046", 27.08)]  // Dark Iron Dwarf - conditional buff
+		[InlineData("NEW1_030", 16.01)] // Deathwing - near the floor
 		public void Matches_training_golden_scores(string cardId, double expected)
 		{
 			var score = Source.GetNormalizedScore(Dbf(cardId));
@@ -71,7 +71,7 @@ namespace HdtArenaHelper.Tests
 			// Golden from the training tool.
 			var score = Source.GetNormalizedScore(Dbf("ICC_833")); // Frost Lich Jaina
 			Assert.NotNull(score);
-			Assert.Equal(78.35, score!.Value.Score, 0.005);
+			Assert.Equal(48.74, score!.Value.Score, 0.005);
 		}
 
 		/// <summary>
@@ -93,6 +93,10 @@ namespace HdtArenaHelper.Tests
 
 			var intercept = (double)root["intercept"]!;
 			var anchor = (double)root["anchor_median_raw"]!;
+			// The display SCALE, not just the centre: the mapping divides by the pool's robust
+			// sigma so the 0-100 spread belongs to the card pool rather than to whatever raw
+			// scale a re-fit landed on.
+			var sigma = (double)root["anchor_sigma_raw"]!;
 			var weights = root["weights"]!.ToObject<System.Collections.Generic.Dictionary<string, double>>()!;
 
 			foreach(var kv in Cards.All)
@@ -108,7 +112,7 @@ namespace HdtArenaHelper.Tests
 				var raw = intercept;
 				foreach(var f in HeuristicArenaDataSource.BuildFeatures(card))
 					raw += (weights.TryGetValue(f.Key, out var w) ? w : 0.0) * f.Value;
-				var expected = System.Math.Max(0, System.Math.Min(100, 50 + 15 * (raw - anchor)));
+				var expected = System.Math.Max(0, System.Math.Min(100, 50 + 15 * (raw - anchor) / sigma));
 
 				var actual = Source.GetNormalizedScore(card.DbfId);
 				Assert.NotNull(actual);

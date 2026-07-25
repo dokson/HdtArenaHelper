@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -15,10 +16,21 @@ namespace HdtArenaHelper
 		/// <summary>Text shown under the plaque (card name, or class name at the hero pick).</summary>
 		public string Label { get; }
 		public BlendedScore Score { get; }
-		public OverlayEntry(string label, BlendedScore score)
+		/// <summary>Mana cost, shown in the deck-review list to identify the card; -1 = hide.</summary>
+		public int Cost { get; }
+
+		/// <summary>
+		/// Extra line under the label, in real units rather than the 0-100 blend (the hero pick's
+		/// estimated class win-rate). Null = nothing to add.
+		/// </summary>
+		public string? Note { get; }
+
+		public OverlayEntry(string label, BlendedScore score, int cost = -1, string? note = null)
 		{
 			Label = label;
 			Score = score;
+			Cost = cost;
+			Note = note;
 		}
 	}
 
@@ -50,9 +62,34 @@ namespace HdtArenaHelper
 		private const double HeroSpreadFraction = 0.29;
 		private const double CardSpreadFraction = 0.26;
 
+		// Deck-review panel geometry, as fractions of the CLIENT (it sits on the left edge, outside
+		// the centred 4:3 design space). It fills the client height and spaces the rows to fit:
+		// there is nothing on that side to align to, so an earlier version's attempt to match the
+		// game's own row pitch — which only ever made sense while the panel overlapped that list —
+		// is gone along with the compression and centring it needed.
+		private const double DeckPanelTopFraction = 0.015;
+		// Five times the top margin, and both earlier values were measured too small on a live
+		// client: 0.015 left the last row flush against the edge (it read as clipped) and 0.045
+		// still overlapped Hearthstone's own bottom bar — the friends button and the clock live
+		// there, so this edge is not free space the way the top is.
+		private const double DeckPanelBottomFraction = 0.075;
+		/// <summary>Floor for a row, below which the 22px badge would clip.</summary>
+		private const double MinDeckRowHeight = 24.0;
+		/// <summary>
+		/// Ceiling for a row. Only bites on an unusually short deck: filling 1000px with 12 rows
+		/// would space them like a menu rather than a card list.
+		/// </summary>
+		private const double MaxDeckRowHeight = 48.0;
+
 		private readonly Canvas _canvas;
+		// Window-space (DIP) layer for edge-anchored UI (the deck-review panel), OUTSIDE the centred
+		// 4:3 Viewbox so it can reach the true window edge, not the letterboxed inset. A Grid, not a
+		// Canvas: WPF alignment re-anchors its child on every resize by itself, where Canvas coords
+		// would go stale until the next render call.
+		private readonly Grid _cornerLayer;
 		private bool _nativePlaqueUnavailable;
 		private bool _shownOnce;
+		private bool _visible;   // our own show/hide state, so the transition is loggable
 		private int _lastLoggedWidth;
 
 		/// <summary>Underground Arena draft — switches the native plaque to its red/gold theme.</summary>
@@ -70,13 +107,20 @@ namespace HdtArenaHelper
 			Visibility = Visibility.Collapsed;
 
 			_canvas = new Canvas { Width = DesignWidth, Height = DesignHeight };
-			Content = new Viewbox
+			var viewbox = new Viewbox
 			{
 				Stretch = Stretch.Uniform, // preserve 4:3, centre it -> HS's letterboxed safe area
 				HorizontalAlignment = HorizontalAlignment.Center,
 				VerticalAlignment = VerticalAlignment.Center,
 				Child = _canvas
 			};
+			// Root grid: the plaque Viewbox (centred 4:3) plus a window-filling layer for
+			// edge-anchored UI that must reach the true window edge, not the letterbox inset.
+			_cornerLayer = new Grid();
+			var root = new Grid();
+			root.Children.Add(viewbox);
+			root.Children.Add(_cornerLayer);
+			Content = root;
 
 			Loaded += (_, __) => MakeClickThrough();
 		}
@@ -89,6 +133,10 @@ namespace HdtArenaHelper
 		{
 			var hwnd = FindWindow(null, "Hearthstone");
 			var show = wantVisible && hwnd != IntPtr.Zero && !IsIconic(hwnd);
+			// Log the transition off OUR OWN flag, not off Visibility: Show() already leaves the
+			// window Visible, so a `Visibility != Visible` check never fired on the first show and
+			// the log came out with no show/hide lines at all — which is exactly the pair of lines
+			// needed to diagnose a "why is it still on screen" report.
 			if(show)
 			{
 				if(!_shownOnce)
@@ -97,16 +145,21 @@ namespace HdtArenaHelper
 					Show();
 				}
 				Reposition(hwnd); // track size/position, incl. resizes
-				if(Visibility != Visibility.Visible)
+				Visibility = Visibility.Visible;
+				if(!_visible)
 				{
-					Visibility = Visibility.Visible;
+					_visible = true;
 					Log("overlay shown");
 				}
 			}
-			else if(Visibility != Visibility.Collapsed)
+			else
 			{
 				Visibility = Visibility.Collapsed;
-				Log("overlay hidden");
+				if(_visible)
+				{
+					_visible = false;
+					Log("overlay hidden");
+				}
 			}
 		}
 
@@ -114,6 +167,7 @@ namespace HdtArenaHelper
 		public void SetEntries(IReadOnlyList<OverlayEntry> entries, bool isHeroPick)
 		{
 			_canvas.Children.Clear();
+			_cornerLayer.Children.Clear(); // drop any deck-review panel from the other phase
 			if(entries.Count == 0)
 				return;
 
@@ -180,6 +234,20 @@ namespace HdtArenaHelper
 				Canvas.SetTop(label, top + h + 4.0);
 				_canvas.Children.Add(label);
 
+				// Extra lines under the label, stacked: the note (hero pick's estimated class
+				// win-rate, in real percentage points) then the synergy reason. Both are optional
+				// and in practice never co-occur, but stacking keeps that from mattering.
+				var nextY = top + h + 4.0 + label.DesiredSize.Height + 2.0;
+				if(e.Note != null)
+				{
+					var note = BuildReason(e.Note);
+					note.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+					Canvas.SetLeft(note, centreX - note.DesiredSize.Width / 2.0);
+					Canvas.SetTop(note, nextY);
+					_canvas.Children.Add(note);
+					nextY += note.DesiredSize.Height + 2.0;
+				}
+
 				// The dominant synergy reason, when one fired ("fills the 3-drop gap").
 				// Marked (exp.): the synergy rules are unvalidated by design (see AGENTS),
 				// and the label keeps that honest at the point of use.
@@ -188,7 +256,7 @@ namespace HdtArenaHelper
 					var reason = BuildReason(e.Score.SynergyReason + " (exp.)");
 					reason.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
 					Canvas.SetLeft(reason, centreX - reason.DesiredSize.Width / 2.0);
-					Canvas.SetTop(reason, top + h + 4.0 + label.DesiredSize.Height + 2.0);
+					Canvas.SetTop(reason, nextY);
 					_canvas.Children.Add(reason);
 				}
 
@@ -197,6 +265,167 @@ namespace HdtArenaHelper
 					$"{(lowConfidence ? " lowConf" : "")}" +
 					$"{(e.Score.SynergyReason != null ? $" reason='{e.Score.SynergyReason}'" : "")}");
 			}
+		}
+
+		/// <summary>
+		/// Render the redraft edit phase's deck panel: EVERY card in the deck, in the game's own
+		/// order (cost, then name) so a row is findable at a glance, each with an HDT-style score
+		/// badge and the suggested cuts flagged red. Call on the UI thread; <paramref name="ranked"/>
+		/// is the cut shortlist, <paramref name="fullDeck"/> the whole deck.
+		///
+		/// An earlier version drew this badge column ON TOP of the game's own "Your Deck" list, so
+		/// the number would sit where the click is. That cannot be aligned and was removed: measured
+		/// live, the redraft deck has 23-28 DISTINCT rows while the game's list shows ~21 without
+		/// scrolling, so it always scrolls — and the scroll offset is not readable from the client,
+		/// which makes every badge position a guess. Our own list is always right.
+		/// </summary>
+		public void SetDeckReview(IReadOnlyList<OverlayEntry> ranked,
+			IReadOnlyList<OverlayEntry>? fullDeck = null)
+		{
+			_canvas.Children.Clear();        // no plaques while reviewing the deck
+			_cornerLayer.Children.Clear();
+			if(ranked.Count == 0)
+				return;
+
+			// Cut rank, not just "is a cut": the shade grades from red (worst card in the deck)
+			// through orange to yellow (the marginal candidate), so the panel says which cuts are
+			// clear and which are close. `ranked` arrives sorted weakest-first, so index IS severity.
+			var cutRank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+			for(var i = 0; i < ranked.Count; i++)
+				cutRank[ranked[i].Label] = i;
+			var ordered = (fullDeck ?? ranked)
+				.OrderBy(e => e.Cost)
+				.ThenBy(e => e.Label, StringComparer.OrdinalIgnoreCase)
+				.ToList();
+
+			// No title: the game's own "Your Deck" header sits right beside it, so ours only added
+			// width and a second heading saying the same thing.
+			var list = new StackPanel();
+
+			// Fill the client height: the rows share whatever space there is, so the panel reads as
+			// one full-height column whatever the deck size. Clamped at both ends — a row may not
+			// shrink under the badge, nor stretch into a menu on a short deck — so a deck outside
+			// that range simply does not fill the height rather than rendering badly.
+			var height = ActualHeight > 0 ? ActualHeight : DesignHeight;
+			var available = height * (1.0 - DeckPanelTopFraction - DeckPanelBottomFraction);
+			var rowHeight = Math.Max(MinDeckRowHeight,
+				Math.Min(MaxDeckRowHeight, available / Math.Max(1, ordered.Count)));
+			var top = height * DeckPanelTopFraction;
+
+			var manaBlue = new SolidColorBrush(Color.FromRgb(90, 165, 245));
+			foreach(var e in ordered)
+			{
+				var lowConfidence = e.Score.HasData && e.Score.IsLowConfidence;
+				var isCut = cutRank.TryGetValue(e.Label, out var rank);
+				var row = new StackPanel
+				{
+					Orientation = Orientation.Horizontal,
+					Height = rowHeight,
+					VerticalAlignment = VerticalAlignment.Center
+				};
+				row.Children.Add(BuildScoreBadge(e,
+					isCut ? CutSeverityColor(rank, ranked.Count) : (Color?)null));
+				// Mana cost (blue, like the game) so each row is identifiable at a glance.
+				if(e.Cost >= 0)
+					row.Children.Add(new TextBlock
+					{
+						Text = e.Cost.ToString(),
+						FontSize = 15,
+						FontWeight = FontWeights.Bold,
+						Width = 20,
+						TextAlignment = TextAlignment.Center,
+						VerticalAlignment = VerticalAlignment.Center,
+						Foreground = manaBlue,
+						Margin = new Thickness(8, 0, 0, 0)
+					});
+				row.Children.Add(new TextBlock
+				{
+					Text = lowConfidence ? e.Label + " *" : e.Label,
+					FontSize = 15,
+					Margin = new Thickness(8, 0, 0, 0),
+					VerticalAlignment = VerticalAlignment.Center,
+					Foreground = isCut ? Brushes.White : (lowConfidence ? Brushes.Silver : Brushes.White),
+					Opacity = lowConfidence && !isCut ? 0.8 : 1.0
+				});
+				list.Children.Add(row);
+			}
+
+			var panel = new Border
+			{
+				Background = new SolidColorBrush(Color.FromArgb(210, 12, 12, 14)),
+				CornerRadius = new CornerRadius(8),
+				Padding = new Thickness(12, 4, 14, 6),
+				Child = list,
+				Effect = new System.Windows.Media.Effects.DropShadowEffect
+				{
+					Color = Colors.Black, BlurRadius = 8, ShadowDepth = 0, Opacity = 0.8
+				},
+				// Against the LEFT edge of the client, opposite the game's own "Your Deck" list:
+				// the row heights already match that list, so sitting on top of it added nothing
+				// and hid its card art. The trade is that a wide panel can clip the leftmost of
+				// the discard columns — keep it narrow. Alignment plus a fractional top margin,
+				// not absolute coordinates, so a client resize re-anchors it by itself.
+				HorizontalAlignment = HorizontalAlignment.Left,
+				VerticalAlignment = VerticalAlignment.Top,
+				Margin = new Thickness(0, top, 0, 0)
+			};
+			_cornerLayer.Children.Add(panel);
+			Log($"deck-review panel: {ordered.Count} deck rows, {ranked.Count} flagged as cuts, " +
+				$"top={top:0} rowHeight={rowHeight:0.0}");
+		}
+
+		/// <summary>
+		/// Severity shade for cut candidate <paramref name="rank"/> of <paramref name="total"/>,
+		/// weakest first: deep red for the clearest cut, through orange, to yellow for the marginal
+		/// one. Interpolated rather than a fixed palette so it reads the same for any candidate
+		/// count, and hue-only — the badge stays legible at every step.
+		/// </summary>
+		private static Color CutSeverityColor(int rank, int total)
+		{
+			var t = total <= 1 ? 0.0 : Math.Min(1.0, Math.Max(0.0, rank / (double)(total - 1)));
+			var worst = Color.FromRgb(0xf8, 0x2a, 0x1e);   // red
+			var mildest = Color.FromRgb(0xf2, 0xc0, 0x2c); // yellow
+			return Color.FromRgb(
+				(byte)Math.Round(worst.R + (mildest.R - worst.R) * t),
+				(byte)Math.Round(worst.G + (mildest.G - worst.G) * t),
+				(byte)Math.Round(worst.B + (mildest.B - worst.B) * t));
+		}
+
+		/// <summary>
+		/// HDT's arena score badge, reproduced: a rounded plate, dark by default. When the card is a
+		/// suggested cut, <paramref name="cutAccent"/> is its severity colour and tints both border
+		/// and plate. Same shape and palette as HDT's premium helper so the overlay reads as native,
+		/// but driven entirely by our own blend.
+		/// </summary>
+		private static Border BuildScoreBadge(OverlayEntry entry, Color? cutAccent)
+		{
+			var hasData = entry.Score.HasData;
+			var accent = cutAccent ?? Color.FromRgb(0x13, 0x17, 0x1A);
+			// A dark wash of the accent, so a yellow-flagged row is still a dark plate with a yellow
+			// edge rather than a bright block that outshouts the score itself.
+			var plate = cutAccent == null
+				? Color.FromRgb(0x23, 0x27, 0x2A)
+				: Color.FromRgb((byte)(accent.R * 0.32), (byte)(accent.G * 0.32), (byte)(accent.B * 0.32));
+			return new Border
+			{
+				Width = 32,
+				Height = 22,
+				CornerRadius = new CornerRadius(3),
+				BorderThickness = new Thickness(1),
+				Background = new SolidColorBrush(plate),
+				BorderBrush = new SolidColorBrush(accent),
+				Child = new TextBlock
+				{
+					Text = hasData ? Math.Round(entry.Score.Value).ToString("0") : "–",
+					FontSize = 14,
+					FontWeight = FontWeights.Bold,
+					HorizontalAlignment = HorizontalAlignment.Center,
+					VerticalAlignment = VerticalAlignment.Center,
+					Foreground = new SolidColorBrush(cutAccent != null
+						? Colors.White
+						: Color.FromArgb(0xbf, 0xff, 0xff, 0xff))
+				}
+			};
 		}
 
 		/// <summary>

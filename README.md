@@ -101,6 +101,13 @@ offline heuristic; nothing paywalled is used or required.
 It suppresses HDT's native overlay while active so the two don't stack, and restores your
 original preference when you disable the plugin — nothing is lost.
 
+**Does it update itself?**
+Yes. On startup (at most once a day) it checks this repo's GitHub releases and, if a
+newer one exists, downloads it and stages it for the next time you restart HDT — no
+manual re-download. You can turn this off, or trigger a check by hand, from
+**Plugins → Arena Helper**. It only ever fetches from this project's official
+releases over HTTPS.
+
 **The overlay doesn't show up over Hearthstone.**
 Run Hearthstone in **Windowed** or **Borderless Windowed** mode (Options → Graphics).
 In exclusive Fullscreen, Windows composites the game above every other window, so no

@@ -35,7 +35,7 @@ namespace HdtArenaHelper
 	/// Plain .NET download (a static CDN — no Cloudflare fingerprinting here), one file
 	/// per class, each cached with a 1-day TTL; classes fail soft and independently.
 	/// </summary>
-	public class FirestoneArenaDataSource : IArenaDataSource
+	public class FirestoneArenaDataSource : IArenaDataSource, IClassWinRateSource
 	{
 		// The Underground pool is used for BOTH arena modes on purpose: a card's drawn
 		// win-rate reflects its intrinsic quality, which is ~mode-invariant, and a classic
@@ -62,6 +62,7 @@ namespace HdtArenaHelper
 		{
 			public Dictionary<int, SourceScore> CardScore { get; }   // dbfId -> score+draws (pooled)
 			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100 (tier list)
+			public Dictionary<CardClass, double> ClassWinRate { get; } // class -> estimated win-rate %
 			public Dictionary<CardClass, Dictionary<int, SourceScore>> ClassCardScore { get; }
 			public Dictionary<int, CardClass> HeroClass { get; }
 			/// <summary>True when every class file backed this bundle. Lives INSIDE the
@@ -73,12 +74,14 @@ namespace HdtArenaHelper
 			public Data(
 				Dictionary<int, SourceScore> cardScore,
 				Dictionary<CardClass, double> classScore,
+				Dictionary<CardClass, double> classWinRate,
 				Dictionary<CardClass, Dictionary<int, SourceScore>> classCardScore,
 				Dictionary<int, CardClass> heroClass,
 				bool isComplete)
 			{
 				CardScore = cardScore;
 				ClassScore = classScore;
+				ClassWinRate = classWinRate;
 				ClassCardScore = classCardScore;
 				HeroClass = heroClass;
 				IsComplete = isComplete;
@@ -92,6 +95,10 @@ namespace HdtArenaHelper
 		private readonly object _classLock = new object();
 		private readonly Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>> _loaded =
 			new Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>>();
+		// Deck-level tally per class, for the estimated class win-rate. Separate from _loaded
+		// because it counts DECKS containing the card, not draws, and the two must not be mixed.
+		private readonly Dictionary<CardClass, (double Wins, double Games)> _deckTally =
+			new Dictionary<CardClass, (double Wins, double Games)>();
 
 		/// <param name="cacheDir">Directory for the per-class cache files (1-day TTL).</param>
 		/// <param name="weight">Relative blend weight; 0 disables the source.</param>
@@ -117,8 +124,14 @@ namespace HdtArenaHelper
 		/// </summary>
 		public bool IsLoaded => _data?.IsComplete == true;
 
+		/// <summary>Real arena win-rates: every score carries the games behind it.</summary>
+		public bool HasSamples => true;
+
 		/// <summary>Per-class 0-100 tier scores (the hero-pick tier list), if loaded.</summary>
 		public IReadOnlyDictionary<CardClass, double>? ClassScores => _data?.ClassScore;
+
+		/// <summary>Per-class estimated arena win-rate in percentage points, if loaded.</summary>
+		public IReadOnlyDictionary<CardClass, double>? ClassWinRates => _data?.ClassWinRate;
 
 		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
 		{
@@ -184,15 +197,19 @@ namespace HdtArenaHelper
 						TryDeleteCache(cls);
 					return;
 				}
+				var tally = ParseClassDeckTally(json);
 				lock(_classLock)
 				{
 					_loaded[cardClass] = rates;
+					if(tally.Games > 0)
+						_deckTally[cardClass] = tally;
 					gotNew = true;
 				}
 			});
 			await Task.WhenAll(fetches).ConfigureAwait(false);
 
 			Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>> snapshot;
+			Dictionary<CardClass, (double Wins, double Games)> tallies;
 			lock(_classLock)
 			{
 				if(!gotNew)
@@ -202,9 +219,10 @@ namespace HdtArenaHelper
 					return;
 				}
 				snapshot = new Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>>(_loaded);
+				tallies = new Dictionary<CardClass, (double Wins, double Games)>(_deckTally);
 			}
 
-			var data = BuildData(snapshot, isComplete: snapshot.Count >= _classes.Count);
+			var data = BuildData(snapshot, tallies, isComplete: snapshot.Count >= _classes.Count);
 			_data = data; // single volatile publication: contents + completeness together
 			Log($"loaded {data.CardScore.Count} cards across {snapshot.Count}/{_classes.Count} classes");
 		}
@@ -213,6 +231,7 @@ namespace HdtArenaHelper
 
 		private static Data BuildData(
 			IReadOnlyDictionary<CardClass, Dictionary<int, (double Rate, int Games)>> perClass,
+			IReadOnlyDictionary<CardClass, (double Wins, double Games)> deckTallies,
 			bool isComplete)
 		{
 			// Pooled rate per card: total wins / total draws across all class files.
@@ -282,9 +301,46 @@ namespace HdtArenaHelper
 			return new Data(
 				cardScore,
 				ScoreMath.ToScores(classTier),
+				ScoreMath.RecentreClassWinRates(deckTallies),
 				classCardScore,
 				HeroSkins.BuildClassMap(),
 				isComplete);
+		}
+
+		/// <summary>
+		/// One class file's DECK-level tally for the estimated class win-rate:
+		/// <c>decksWithCardThenWin</c> over <c>decksWithCard</c>, summed over the class's cards.
+		/// Deliberately a different quantity from the drawn rate the card scores use — the target
+		/// is a whole deck's win-rate, and every game is counted once per card the deck contained.
+		/// Duplicate card ids are summed rather than deduped: unlike a per-card rate, adding the
+		/// same card twice only re-weights the pool slightly, while dropping the larger entry would
+		/// bias it. The offset this introduces is removed by
+		/// <see cref="ScoreMath.RecentreClassWinRates"/> anyway.
+		/// </summary>
+		private static (double Wins, double Games) ParseClassDeckTally(string json)
+		{
+			double wins = 0, games = 0;
+			try
+			{
+				if(!(JObject.Parse(json)["stats"] is JArray stats))
+					return (0, 0);
+
+				foreach(var entry in stats)
+				{
+					var s = entry["stats"];
+					var decks = (double?)s?["decksWithCard"] ?? 0;
+					if(decks <= 0)
+						continue;
+					wins += (double?)s?["decksWithCardThenWin"] ?? 0;
+					games += decks;
+				}
+			}
+			catch(Exception ex)
+			{
+				Log($"class deck tally parse failed: {ex.Message}");
+				return (0, 0);
+			}
+			return (wins, games);
 		}
 
 		/// <summary>dbf -> (drawn win-rate %, drawn games) for one class file. No noise

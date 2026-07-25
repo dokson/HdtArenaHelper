@@ -76,9 +76,40 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           $expected = "v${{ steps.ver.outputs.version }}"
+
+          # Tags MUST be 3-part (vMAJOR.MINOR.PATCH). The self-updater compares versions on
+          # (major, minor, build) only — a 4-part tag like v0.1.2.1 would read as "not newer" than
+          # an installed 0.1.2 and would never be installed, so a hotfix released that way would
+          # reach nobody. The updater IS the recovery mechanism for a bad release, so this is
+          # enforced here rather than left to memory.
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Tag $tag is not 3-part (vMAJOR.MINOR.PATCH). A 4-part or pre-release tag would never be installed by the self-updater."
+          }
           if ($tag -ne $expected) {
             throw "Pushed tag $tag does not match project version $expected."
           }
-          gh release create $tag '${{ steps.pkg.outputs.zip }}' `
-            --repo '${{ github.repository }}' --title $tag --generate-notes --latest
+          # Publish as a DRAFT, upload the assets, and only then make it public and `latest`.
+          #
+          # `gh release create <assets>` creates the release FIRST and uploads after, so a
+          # transient upload failure leaves a published, latest-marked release with no
+          # HdtArenaHelper.dll — and the in-plugin self-updater looks that asset up by exact
+          # name. Every client would then see a newer version it cannot fetch and nag daily,
+          # and the job could not simply be re-run because the release already exists.
+          # Draft-then-promote means `releases/latest` never exposes an asset-less release, and
+          # `--clobber` keeps a re-run idempotent.
+          $repo = '${{ github.repository }}'
+          gh release create $tag --repo $repo --title $tag --generate-notes --draft
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create draft release $tag." }
+
+          gh release upload $tag '${{ steps.pkg.outputs.zip }}' 'dist/HdtArenaHelper/HdtArenaHelper.dll' `
+            --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets for $tag." }
+
+          # Fail loudly if the asset the updater depends on is not actually there.
+          $assets = gh release view $tag --repo $repo --json assets --jq '.assets[].name'
+          if ($assets -notcontains 'HdtArenaHelper.dll') {
+            throw "Release $tag is missing the HdtArenaHelper.dll asset; leaving it as a draft."
+          }
+
+          gh release edit $tag --repo $repo --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw "Failed to publish GitHub release $tag." }
