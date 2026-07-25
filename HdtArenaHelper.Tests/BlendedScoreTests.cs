@@ -21,7 +21,7 @@ namespace HdtArenaHelper.Tests
 		{
 			var score = new BlendedScore(
 				value: 62,
-				components: new List<ScoreComponent> { new ScoreComponent("HSReplay Arena", 62, 1.0) },
+				components: new List<ScoreComponent> { new ScoreComponent("HSReplay Arena", 62, 1.0, games: 5000, fromSample: true) },
 				synergyBonus: 0);
 
 			Assert.True(score.HasData);
@@ -33,8 +33,8 @@ namespace HdtArenaHelper.Tests
 		{
 			var components = new List<ScoreComponent>
 			{
-				new ScoreComponent("HSReplay Arena", 70, 1.0),
-				new ScoreComponent("Heuristic", 55, 0.5),
+				new ScoreComponent("HSReplay Arena", 70, 1.0, games: 5000, fromSample: true),
+				new ScoreComponent("Heuristic", 55, 0.5, games: null, fromSample: false),
 			};
 			var score = new BlendedScore(value: 68, components, synergyBonus: 3.5);
 

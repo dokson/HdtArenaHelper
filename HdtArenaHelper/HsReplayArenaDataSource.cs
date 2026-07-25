@@ -145,18 +145,24 @@ namespace HdtArenaHelper
 
 			// Hero pick: rank the offered classes instead of a single card. A tier is
 			// backed by a whole class bucket, not one card's sample: no games discount.
+			// Checked BEFORE canonicalizing: hero skins are collectible cards sharing a name with
+			// the default hero, and collapsing them would score a skin as its base hero's printing.
 			if(data.HeroClass.TryGetValue(dbfId, out var heroClass))
 				return data.ClassScore.TryGetValue(heroClass, out var cs)
 					? new SourceScore(cs)
 					: (SourceScore?)null;
 
+			// The client reports whichever printing it has; the parsed maps are keyed by the
+			// canonical one, so resolve before looking anything up.
+			var canonical = CardIdentity.Canonical(dbfId);
+
 			// Known drafted class: prefer the card's rate in that class's own bucket.
 			if(draftClass != CardClass.INVALID
 				&& data.ClassCardScore.TryGetValue(draftClass, out var perClass)
-				&& perClass.TryGetValue(dbfId, out var classScore))
+				&& perClass.TryGetValue(canonical, out var classScore))
 				return classScore;
 
-			return data.CardScore.TryGetValue(dbfId, out var score) ? score : (SourceScore?)null;
+			return data.CardScore.TryGetValue(canonical, out var score) ? score : (SourceScore?)null;
 		}
 
 		public async Task EnsureLoadedAsync()
@@ -326,6 +332,8 @@ namespace HdtArenaHelper
 				// safe ONLY because Endpoint and BrowserUserAgent are const — keep them const.
 				var psi = new ProcessStartInfo("curl",
 					$"-fsSL --compressed --connect-timeout 10 --max-time 30 " +
+					// Refuse an oversized body at the transport, before it costs us any memory.
+					$"--max-filesize {PayloadGuard.MaxPayloadBytes} " +
 					$"--max-filesize 16777216 -A \"{BrowserUserAgent}\" \"{Endpoint}\"")
 				{
 					RedirectStandardOutput = true,
@@ -402,7 +410,7 @@ namespace HdtArenaHelper
 			var result = new Dictionary<int, ArenaCardScore>();
 			try
 			{
-				var bucket = (JObject.Parse(json)["data"] as JObject)?["ALL"] as JArray;
+				var bucket = (PayloadGuard.ParseObject(json)?["data"] as JObject)?["ALL"] as JArray;
 				if(bucket == null)
 					return result;
 
@@ -413,18 +421,29 @@ namespace HdtArenaHelper
 						continue;
 					if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard) || dbCard.DbfId == 0)
 						continue;
+					var dbf = CardIdentity.Canonical(dbCard.DbfId);
 
 					var games = (int?)card["num_games"] ?? 0;
-					if(games < ScoreMath.MinGames)
+					var winrate = ReadWinrate(card);
+					if(games < ScoreMath.MinGames || winrate == null)
 						continue;
 
-					// One card id can map to several dbf ids only via variants; keep the
-					// entry backed by the most games.
-					if(result.TryGetValue(dbCard.DbfId, out var existing) && (existing.Games ?? 0) >= games)
+					// REPRINTS ARE SUMMED, not de-duplicated by "most games": the feeds disagree on
+					// which printing to report (CORE_YOP_001 vs YOP_001), and keeping only the larger
+					// entry would throw away real games. Summed as COUNTS — wins and games — because
+					// averaging two rates would weight a 500-game printing like a 30,000-game one.
+					if(result.TryGetValue(dbf, out var existing))
+					{
+						var seenGames = existing.Games ?? 0;
+						var totalGames = seenGames + games;
+						var rate = ((existing.DrawnWinrate ?? 0) * seenGames + winrate.Value * games) / totalGames;
+						var popularity = (existing.IncludedPopularity ?? 0) + ((double?)card["popularity"] ?? 0);
+						result[dbf] = new ArenaCardScore(dbf, rate, popularity, totalGames);
 						continue;
+					}
 
-					result[dbCard.DbfId] = new ArenaCardScore(
-						dbCard.DbfId, ReadWinrate(card), (double?)card["popularity"], games);
+					result[dbf] = new ArenaCardScore(
+						dbf, winrate, (double?)card["popularity"], games);
 				}
 			}
 			catch(Exception ex)
@@ -451,7 +470,7 @@ namespace HdtArenaHelper
 			var result = new Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>>();
 			try
 			{
-				var data = JObject.Parse(json)["data"] as JObject;
+				var data = PayloadGuard.ParseObject(json)?["data"] as JObject;
 				if(data == null)
 					return result;
 
@@ -463,6 +482,7 @@ namespace HdtArenaHelper
 						continue;
 
 					var shrunk = new Dictionary<int, (double Rate, int Games)>();
+					var merged = new Dictionary<int, (double Rate, int Games)>();
 					foreach(var card in bucket)
 					{
 						var cardId = (string?)card["card_id"];
@@ -470,16 +490,27 @@ namespace HdtArenaHelper
 							continue;
 						if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard) || dbCard.DbfId == 0)
 							continue;
+						var dbf = CardIdentity.Canonical(dbCard.DbfId);
 
 						var winrate = ReadWinrate(card);
 						var n = (int?)card["num_games"] ?? 0;
 						if(winrate == null || n < ScoreMath.MinGames)
 							continue;
-						if(shrunk.TryGetValue(dbCard.DbfId, out var seen) && seen.Games >= n)
-							continue;
 
-						shrunk[dbCard.DbfId] = (ScoreMath.Shrink(winrate.Value, n,
-							LeaveClassOutTarget(dbCard.DbfId, winrate.Value, n, raw, allShrunk, globalMean)), n);
+						// Accumulate RAW counts per canonical card; shrinkage happens afterwards, on
+						// the merged sample. Shrinking each printing first and then combining would
+						// pull the same card toward the prior twice.
+						if(merged.TryGetValue(dbf, out var seen))
+							merged[dbf] = ((seen.Rate * seen.Games + winrate.Value * n) / (seen.Games + n),
+								seen.Games + n);
+						else
+							merged[dbf] = (winrate.Value, n);
+					}
+					foreach(var kv in merged)
+					{
+						shrunk[kv.Key] = (ScoreMath.Shrink(kv.Value.Rate, kv.Value.Games,
+							LeaveClassOutTarget(kv.Key, kv.Value.Rate, kv.Value.Games, raw, allShrunk,
+								globalMean)), kv.Value.Games);
 					}
 					if(shrunk.Count > 0)
 						result[cls] = shrunk;
@@ -509,7 +540,7 @@ namespace HdtArenaHelper
 			var result = new Dictionary<CardClass, Dictionary<Race, double>>();
 			try
 			{
-				var data = JObject.Parse(json)["data"] as JObject;
+				var data = PayloadGuard.ParseObject(json)?["data"] as JObject;
 				if(data == null)
 					return result;
 
@@ -570,7 +601,7 @@ namespace HdtArenaHelper
 			var tallies = new Dictionary<CardClass, (double Wins, double Games)>();
 			try
 			{
-				var data = JObject.Parse(json)["data"] as JObject;
+				var data = PayloadGuard.ParseObject(json)?["data"] as JObject;
 				if(data == null)
 					return new Dictionary<CardClass, double>();
 
@@ -614,18 +645,11 @@ namespace HdtArenaHelper
 			IReadOnlyDictionary<int, ArenaCardScore> raw, IReadOnlyDictionary<int, double> allShrunk,
 			double globalMean)
 		{
-			if(raw.TryGetValue(dbfId, out var all) && all.DrawnWinrate.HasValue)
-			{
-				var allGames = all.Games ?? 0;
-				var looGames = allGames - classGames;
-				if(looGames >= ScoreMath.MinGames)
-				{
-					var loo = (allGames * all.DrawnWinrate.Value - classGames * classRate) / looGames;
-					if(loo >= 0 && loo <= 100)
-						return loo;
-				}
-			}
-			return allShrunk.TryGetValue(dbfId, out var allRate) ? allRate : globalMean;
+			var fallback = allShrunk.TryGetValue(dbfId, out var allRate) ? allRate : globalMean;
+			if(!raw.TryGetValue(dbfId, out var all) || !all.DrawnWinrate.HasValue)
+				return fallback;
+			return ScoreMath.LeaveOneOutTarget(all.DrawnWinrate.Value, all.Games ?? 0,
+				classRate, classGames, fallback);
 		}
 
 		private static void Log(string msg)

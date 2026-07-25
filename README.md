@@ -16,9 +16,12 @@ During an Arena or Underground Arena draft it reads the three offered cards and 
 single blended **0–100 score** for each, right in an overlay over the client — no
 subscription, no paywalled data, no account required.
 
-> **Status: work in progress.** Draft detection, data pipeline, scoring and the overlay are
-> live and verified on a real HDT client. Two independent win-rate sources, class-context
-> scoring and a bounded deck-synergy engine are in — see [Roadmap](#roadmap) for what's next.
+It exists to be **a free alternative to the tracker's own freemium arena assistant**, with a
+scoring algorithm of its own: open, documented, and fed by more than one data provider.
+
+> **Status: usable, and still moving.** Draft detection, the data pipeline, scoring and the
+> overlay are live and verified on a real HDT client, including the post-loss redraft. Next up is
+> following you out of the draft and into the game — see [Roadmap](#roadmap).
 
 ![The class tier list at the hero pick](docs/screenshot-hero.png)
 
@@ -26,18 +29,51 @@ subscription, no paywalled data, no account required.
 
 ## Why this plugin
 
-Most arena tier-list tools are either a browser tab you tab out to mid-draft, or a paid
-overlay behind a subscription. HDT Arena Helper scores every pick **in the client, in
-real time**, using only data that's free and public:
+Hearthstone Deck Tracker is excellent, and its arena assistant is one of its best features —
+but it is **freemium**: the draft scores stop when the trial does. Everything else in this
+space is either a browser tab you alt-tab to mid-draft, or another subscription. This plugin
+does that job **in the client, in real time, for free and forever**, from data anyone can
+fetch.
 
-- **No subscription.** Real arena win-rate data comes from two independent free public
-  sources (HSReplay and Firestone), blended — if one goes dark, the other carries the score.
+**Free alternative, not a clone.** The scoring is ours, and deliberately not single-sourced.
+HSReplay is the natural arena data provider — it is also made by the same team as the tracker,
+so a helper built on it alone inherits one provider's view of the format. This plugin blends
+**two independent free win-rate sources** (HSReplay and Firestone) as one consensus signal, so
+no single provider decides the number, and if either goes dark the other keeps the score alive.
+Adding further public sources is an explicit goal, not an afterthought.
+
+**Built for the player who does not follow the meta.** You should not need to have read a tier
+list, memorised the current pool, or know which tribe a class is quietly full of, to draft
+reasonably. The plugin turns all of that into one number per card, and tells you *why* when
+something moved it — the mana slot you are short of, the tribe you have no members for, the
+sample size behind the estimate.
+
+**"Objective" in a specific, checkable sense**, which is the part we care about most:
+
+- every score traces back to **published arena win-rate statistics** — real games won and
+  lost — never to anyone's opinion of a card, ours included;
+- the offline fallback's weights are **fit by regression against those win-rates**, never
+  hand-tuned. Hand-tuned keyword bonuses were tried and measured *worse* than nothing;
+- where a rule **cannot** be validated against public data (deck synergy) it is bounded so it
+  can only break ties, and the overlay marks it `(exp.)`;
+- the method, the measurements and the **failures** are written down in
+  [`REPORT.md`](./HdtArenaHelper.Training/REPORT.md), including several ideas that were tried
+  and scored worse. You can audit the number instead of trusting it.
+
+To be equally clear about what this is **not**: the paid assistant has data we do not have, and
+we have never benchmarked against it. Nothing here claims to be more accurate than it — only
+free, transparent, and honest about its limits.
+
+Also, by construction:
+
 - **No blank picks.** An offline heuristic (fit from real win-rate data, not hand-tuned
-  keyword bonuses) backstops cards the win-rate source hasn't seen yet.
+  keyword bonuses) backstops cards the win-rate sources haven't seen yet.
 - **No separate window.** The score renders using HDT's own native `ArenaPlaque` visuals,
   scaled to the client — it looks like part of the tracker, not a bolt-on.
-- **No re-scraping abuse.** Data is cached with a 1-day TTL; nothing is hammered or
-  redistributed.
+- **No re-scraping abuse.** Data is cached with a 1-day TTL; nothing is hammered, scraped from
+  behind a paywall, or redistributed. And "publicly reachable" is not treated as "licensed": each
+  source is individually droppable, because whether we may use one is the provider's call, not
+  ours.
 
 ## Features
 
@@ -50,15 +86,19 @@ real time**, using only data that's free and public:
     back to the global rate where the class sample is thin).
   - An offline metadata heuristic as a fallback, with weights fit by ridge regression
     against real win-rate data — not hand-tuned.
-- **Deck-aware synergy (experimental)** — a small, deliberately bounded bonus from the
-  cards you've already drafted: curve gaps, tribal payoffs/members, weapon crowding,
-  spell damage. It breaks ties between comparable cards; it never overrides the
-  win-rate signal. Experimental because these rules cannot be validated against public
-  data — the overlay marks its reasons "(exp.)" accordingly.
-- **Class / hero picker** — at the hero pick, classes are ranked from the same win-rate
-  data, so the overlay doubles as a tier list for your next hero.
-- **Underground Arena support** — scores the legendary-group pick as the average quality
-  of the four cards it adds.
+- **Deck-aware synergy (experimental)** — a bounded +/- from what you already drafted: curve
+  gaps, tribal payoffs, weapon and location crowding, spell damage. It breaks ties, never
+  overrides a win-rate. Marked `(exp.)` in the overlay because no public data can validate it.
+  One exception is allowed to reorder a close pick: a card that is structurally **dead** (a
+  tribal payoff with none of its tribe), weighted by how much of your class's deck that tribe
+  normally holds.
+- **Class / hero picker** — at the hero pick, classes are ranked from the same win-rate data,
+  with each class's **estimated arena win-rate in real percentage points** under the plaque.
+- **Underground Arena support** — scores the legendary-group pick as the average quality of the
+  four cards it adds, and during a post-loss **redraft** shows your whole deck as a scored,
+  full-height list so the cards to cut are obvious.
+- **Self-updating** — checks this repo's public releases once a day and stages the new build for
+  the next restart, keeping the previous one as a one-file rollback.
 - **Native look** — hosts HDT's own `ArenaPlaque` control in a scalable overlay, so it
   resizes and DPI-corrects automatically with the game window.
 - **Toggleable** — enable/disable and refresh cached data from HDT's Plugins menu; your
@@ -70,10 +110,11 @@ real time**, using only data that's free and public:
 finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  synergyBonus
 ```
 
-Each data source normalizes its own metric (win-rate %, heuristic points, …) onto a common
-0–100 scale so they can be blended fairly. Real arena win-rate is the primary signal; the
-offline heuristic is a deliberately weak backstop — card *metadata* alone predicts arena
-win-rate only loosely, so whenever real win-rate data exists for a card, it drives the score.
+Each source normalizes its own metric onto a common 0–100 scale, so they blend fairly. Real
+arena win-rate drives the score; the offline heuristic is a deliberately weak backstop, because
+card metadata alone predicts win-rate only loosely. Two consequences, both measured rather than
+assumed: a source's weight shrinks with its sample size for that card, and a card **no** feed has
+seen is pulled toward the middle instead of asserting a confident number.
 
 ## Install
 
@@ -94,19 +135,17 @@ Use the **Plugins → Arena Helper** menu in HDT to toggle the overlay or force 
 ## FAQ
 
 **Does this need a paid subscription (Arenasmith, HSReplay Premium, etc.)?**
-No. All scoring comes from HSReplay's and Firestone's free public arena data plus an
-offline heuristic; nothing paywalled is used or required.
+No — that is the point of the project. Scoring comes from HSReplay's and Firestone's free public
+arena data plus an offline heuristic. Nothing paywalled is used, required, or scraped.
 
 **Does it replace HDT's native Arenasmith overlay?**
 It suppresses HDT's native overlay while active so the two don't stack, and restores your
 original preference when you disable the plugin — nothing is lost.
 
 **Does it update itself?**
-Yes. On startup (at most once a day) it checks this repo's GitHub releases and, if a
-newer one exists, downloads it and stages it for the next time you restart HDT — no
-manual re-download. You can turn this off, or trigger a check by hand, from
-**Plugins → Arena Helper**. It only ever fetches from this project's official
-releases over HTTPS.
+Yes: at most once a day it checks this repo's releases and stages a newer build for your next
+HDT restart, keeping the previous one as a rollback. Toggle it, or check by hand, from
+**Plugins → Arena Helper**. It fetches only from this project's official releases, over HTTPS.
 
 **The overlay doesn't show up over Hearthstone.**
 Run Hearthstone in **Windowed** or **Borderless Windowed** mode (Options → Graphics).
@@ -118,17 +157,29 @@ Very new or very low-sample cards fall back to the offline heuristic (a weaker s
 design) until enough real arena games exist for a shrinkage-adjusted win-rate.
 
 **Does it consider my drafted deck (synergies, curve, tribes)?**
-Yes, conservatively: curve gaps, tribal payoffs/members, weapon crowding and spell-damage
-pairing add a bonus clamped to a few points. It's deliberately small — these rules can't
-be validated against public data the way the win-rate signal can, so they nudge close
-calls rather than decide picks.
+Yes, conservatively: the bonus is clamped to a few points, so it nudges close calls rather than
+deciding picks — these rules cannot be validated against public data the way a win-rate can. The
+one exception is a card that is structurally dead in your deck, which may reorder a close pick.
 
 ## Roadmap
 
-- [x] Deck-synergy engine — a +/- bonus from the cards already drafted (tribal payoffs,
-      curve fit, anti-synergy), on top of the win-rate/heuristic blend.
-- [x] Firestone's public arena data as a second runtime win-rate source.
-- [ ] Live verification pass of class-context scoring and synergy on a real draft.
+What shipped is in the [changelog](./CHANGELOG.md). Next, in **0.1.3** — the helper follows you
+out of the draft and into the game:
+
+- [ ] **Discover / card choices in game.** The same scoring engine, applied to the cards a
+      Discover offers. Both the choices and their on-screen positions are readable, so this is
+      mostly detection plus a layout.
+- [ ] **Mulligan guidance** — keep/replace win-rate and keep rate per card, computed from the
+      mulligan counters Firestone already publishes. Single-source and thin-sampled, so it needs
+      the same shrinkage the card scores use; it will be presented as the estimate it is.
+- [x] **Board awareness, stated rather than scored.** A Discover now says when a card is
+      unplayable this turn, when the board has no room for a minion, and when a full hand would
+      destroy the card outright. The score itself is untouched: the rules make those facts
+      objective, but nothing public says what they are worth in points, and inventing a value is
+      the one thing this project has already measured to be worse than nothing.
+- [ ] **Judgement calls that go beyond the rules** ("I am behind, I want removal"). Still open, and
+      still bounded and experimental if it ever lands — there is no public per-game dataset to fit
+      it against.
 
 Have an idea or found a bug? Open an [issue](https://github.com/dokson/HdtArenaHelper/issues).
 
@@ -145,6 +196,10 @@ code style, and how the heuristic weights are fit and re-trained. Please also re
 | [HSReplay](https://hsreplay.net/) arena API | Real arena win-rate / popularity per card and class (free, public) |
 | HearthDb (bundled with HDT) | Card metadata, used offline for the heuristic and id resolution |
 | [Firestone](https://www.firestoneapp.com/) public arena CDN | Real arena win-rate per class: second runtime win-rate source + offline weight fitting |
+
+Both feeds are scoped to **Underground Arena** and to recent games (HSReplay reports a 4-day
+window, Firestone the current patch). So no pre-patch games dilute a score — and if you play normal
+Arena, the numbers still come from Underground games, which is a real caveat rather than a detail.
 
 ## Changelog
 

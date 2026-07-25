@@ -21,6 +21,35 @@ namespace HdtArenaHelper.Tests
 		}
 
 		[Fact]
+		public void The_leave_one_out_prior_removes_the_observations_own_games()
+		{
+			// 10000 games at 52% overall, of which 1000 at 60% are this class: the prior must be the
+			// OTHER 9000, i.e. (10000*52 - 1000*60)/9000 = 51.11 — not 52, which would shrink the
+			// observation toward a number that already contains it.
+			Assert.Equal((10000 * 52.0 - 1000 * 60.0) / 9000,
+				ScoreMath.LeaveOneOutTarget(52.0, 10000, 60.0, 1000, fallback: 50), 6);
+		}
+
+		[Fact]
+		public void A_thin_remainder_falls_back_instead_of_asserting_a_prior()
+		{
+			// Subtracting the class out leaves 5 games: not a prior, a coin flip.
+			Assert.Equal(47.5, ScoreMath.LeaveOneOutTarget(52.0, 1005, 60.0, 1000, fallback: 47.5), 6);
+		}
+
+		[Fact]
+		public void An_out_of_range_remainder_falls_back()
+		{
+			// The guard that existed in one source's copy of this policy and not the other's. It fires
+			// on rounding over a tiny remainder and — since the feeds are untrusted input — on a
+			// poisoned rate: a 300% class rate would otherwise drive the prior far below zero.
+			Assert.Equal(50.0,
+				ScoreMath.LeaveOneOutTarget(52.0, 10000, 300.0, 5000, fallback: 50), 6);
+			Assert.Equal(50.0,
+				ScoreMath.LeaveOneOutTarget(52.0, 10000, -300.0, 5000, fallback: 50), 6);
+		}
+
+		[Fact]
 		public void Recentres_the_pool_onto_fifty()
 		{
 			// Pooled = 1100/2000 = 55%: the +5pp bias the games-weighting introduces.

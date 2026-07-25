@@ -51,6 +51,41 @@ namespace HdtArenaHelper.Tests
 		private static readonly int[] NoDeck = new int[0];
 
 		[Fact]
+		public void A_winrate_source_without_a_per_card_sample_still_counts_as_real_data()
+		{
+			// The hero pick: the class TIER is a real win-rate, backed by a whole class bucket rather
+			// than one card, so it carries no games. Deducing "no data" from "no games" made the
+			// overlay print "win-rate data unavailable" over three displayed win-rates and star every
+			// class as low-confidence — verified on a live client, hence this test.
+			var tier = new FakeSource("HSReplay", 0.5,
+				new Dictionary<int, SourceScore?> { { 1, new SourceScore(58) } }, hasSamples: true);
+			var agg = new ScoreAggregator(new IArenaDataSource[] { tier });
+
+			var s = agg.Score(1, NoDeck);
+
+			Assert.True(s.HasData);
+			Assert.True(s.HasWinRateData);
+			Assert.False(s.IsLowConfidence);
+			Assert.Null(s.MaxGames);
+		}
+
+		[Fact]
+		public void A_model_only_score_is_still_flagged_low_confidence()
+		{
+			// The other side of the same rule: no empirical source at all must stay flagged, or the
+			// fix above would silently bless heuristic-only scores as measured.
+			var model = new FakeSource("Heuristic", 0.5,
+				new Dictionary<int, SourceScore?> { { 1, new SourceScore(58) } }, hasSamples: false);
+			var agg = new ScoreAggregator(new IArenaDataSource[] { model });
+
+			var s = agg.Score(1, NoDeck);
+
+			Assert.True(s.HasData);
+			Assert.False(s.HasWinRateData);
+			Assert.True(s.IsLowConfidence);
+		}
+
+		[Fact]
 		public void Blends_sources_by_weight()
 		{
 			var a = new FakeSource("A", 1.0, Scores(1, 80, games: 5000));

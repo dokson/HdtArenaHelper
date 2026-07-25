@@ -35,6 +35,40 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
+	/// One card on the mulligan screen: its keep record for the drafted class, or null stats when the
+	/// sample is too thin to state. Deliberately NOT an <see cref="OverlayEntry"/> — these are
+	/// percentage points, not the 0-100 blend, and rendering them through the same plaque would
+	/// invite reading a 55 here as a 55 there.
+	/// </summary>
+	public class MulliganOverlayEntry
+	{
+		public string Label { get; }
+		public MulliganCardStats? Stats { get; }
+
+		public MulliganOverlayEntry(string label, MulliganCardStats? stats)
+		{
+			Label = label;
+			Stats = stats;
+		}
+	}
+
+	/// <summary>
+	/// Which screen the plaques are being laid out for. Not a cosmetic choice: the draft anchors
+	/// are offset to the LEFT because the arena draft screen reserves its right quarter for the
+	/// deck list, and an in-game Discover has no such panel — reusing the draft's centre would put
+	/// every plaque off to one side.
+	/// </summary>
+	public enum OverlayLayout
+	{
+		/// <summary>Arena card draft, and the Underground legendary-group pick.</summary>
+		CardDraft,
+		/// <summary>Arena hero / class pick: portraits sit wider and higher.</summary>
+		HeroPick,
+		/// <summary>In-game card choice (Discover): centred on the full screen.</summary>
+		InGameChoice,
+	}
+
+	/// <summary>
 	/// Borderless, click-through, top-most overlay that covers the Hearthstone client and
 	/// shows a score plaque above each offered option — for both the card draft and the hero
 	/// pick, mirroring HDT's built-in arena overlay.
@@ -60,7 +94,23 @@ namespace HdtArenaHelper
 		// live-tuned: hero portraits sit wider; plain cards and legendary-group columns
 		// share the same layout in the client, so they share one spread.
 		private const double HeroSpreadFraction = 0.29;
+		// Hero plaques sit BELOW the portrait and the game's own hero-name banner, the way HDT's
+		// own arena overlay places them. Live-tuned twice: at 0.43 they hugged the portrait bottom
+		// and our label and win-rate line ran straight through the client's red hero name; 0.62 sat
+		// a touch low against the frame below.
+		private const double HeroCentreYFraction = 0.60;
 		private const double CardSpreadFraction = 0.26;
+		// In-game Discover: centred on the WHOLE design space (no deck panel to avoid). Live-tuned:
+		// the cards are drawn much larger than draft cards, so the plaques go BELOW them — at 0.34
+		// they sat on the art and covered the card text — and the columns are wider apart than the
+		// draft's, which put the outer two plaques well inside their cards.
+		private const double ChoiceSpreadFraction = 0.27;
+		private const double ChoiceCentreYFraction = 0.74;
+		// Mulligan: the opening hand sits centred and low, so the numbers go ABOVE the cards.
+		// Live-tuned: at 0.30 the stack landed on the cards themselves, hiding the gauge against the
+		// card art and covering the mana gems.
+		private const double MulliganSpreadFraction = 0.20;
+		private const double MulliganCentreYFraction = 0.22;
 
 		// Deck-review panel geometry, as fractions of the CLIENT (it sits on the left edge, outside
 		// the centred 4:3 design space). It fills the client height and spaces the rows to fit:
@@ -164,7 +214,7 @@ namespace HdtArenaHelper
 		}
 
 		/// <summary>Replace the displayed plaques (call on the UI thread). Coords are design-space.</summary>
-		public void SetEntries(IReadOnlyList<OverlayEntry> entries, bool isHeroPick)
+		public void SetEntries(IReadOnlyList<OverlayEntry> entries, OverlayLayout layout)
 		{
 			_canvas.Children.Clear();
 			_cornerLayer.Children.Clear(); // drop any deck-review panel from the other phase
@@ -177,14 +227,18 @@ namespace HdtArenaHelper
 			{
 				if(!e.Score.HasData)
 					continue;
-				// A score backed by an actual game sample, not just the offline model.
-				if(e.Score.MaxGames != null)
+				// Any empirical win-rate source, with or without a per-card sample size: a class tier
+				// is real data backed by a whole bucket, and testing MaxGames instead made this
+				// banner fire at the hero pick while three win-rates were on screen.
+				if(e.Score.HasWinRateData)
 					anyWinrate = true;
 				if(e.Score.Value > best)
 					best = e.Score.Value;
 			}
 
-			var playWidth = DesignWidth * PlayFraction;
+			// The draft screens keep their right quarter for the deck list, so options centre on the
+			// play region; an in-game choice centres on the whole screen.
+			var playWidth = layout == OverlayLayout.InGameChoice ? DesignWidth : DesignWidth * PlayFraction;
 			var playCentre = playWidth / 2.0;
 
 			// No option is backed by real win-rate data (offline, curl blocked, or the
@@ -199,12 +253,23 @@ namespace HdtArenaHelper
 				Canvas.SetTop(note, DesignHeight * 0.72);
 				_canvas.Children.Add(note);
 			}
-			var spread = playWidth * (isHeroPick ? HeroSpreadFraction : CardSpreadFraction);
-			// Vertical anchors, both live-tuned: hero plaques hug the portrait bottom
-			// (also keeps our labels off the game's own hero names), cards sit lower.
-			var centreY = isHeroPick ? DesignHeight * 0.43 : DesignHeight * 0.55;
+			var spread = playWidth * (layout switch
+			{
+				OverlayLayout.HeroPick => HeroSpreadFraction,
+				OverlayLayout.InGameChoice => ChoiceSpreadFraction,
+				_ => CardSpreadFraction,
+			});
+			// Vertical anchors, live-tuned per screen: hero plaques hug the portrait bottom (which
+			// also keeps our labels off the game's own hero names), draft cards sit lower, and an
+			// in-game choice sits higher because its cards are drawn larger.
+			var centreY = DesignHeight * (layout switch
+			{
+				OverlayLayout.HeroPick => HeroCentreYFraction,
+				OverlayLayout.InGameChoice => ChoiceCentreYFraction,
+				_ => 0.55,
+			});
 
-			Log($"layout heroPick={isHeroPick} playW={playWidth:0} centre={playCentre:0} spread={spread:0} centreY={centreY:0}");
+			Log($"layout {layout} playW={playWidth:0} centre={playCentre:0} spread={spread:0} centreY={centreY:0}");
 
 			for(var i = 0; i < entries.Count; i++)
 			{
@@ -266,6 +331,138 @@ namespace HdtArenaHelper
 					$"{(e.Score.SynergyReason != null ? $" reason='{e.Score.SynergyReason}'" : "")}");
 			}
 		}
+
+
+		/// <summary>
+		/// Render the mulligan screen: per card, the win-rate of games where it was KEPT and how often
+		/// players keep it, for the drafted class. Call on the UI thread.
+		///
+		/// Presented as an estimate on purpose, and the wording carries three caveats the data cannot
+		/// remove: it is a single source (only Firestone publishes these counters, so there is no
+		/// consensus), it is not causal (a card is kept in hands that already look good, so part of a
+		/// high keep win-rate is the hand and not the card), and the sample is small. A card with too
+		/// thin a sample shows a dash rather than a number nobody could act on.
+		/// </summary>
+		public void SetMulligan(IReadOnlyList<MulliganOverlayEntry> entries)
+		{
+			_canvas.Children.Clear();
+			_cornerLayer.Children.Clear();
+			if(entries.Count == 0)
+				return;
+
+			var spread = DesignWidth * MulliganSpreadFraction;
+			var centreY = DesignHeight * MulliganCentreYFraction;
+			var centreX = DesignWidth / 2.0;
+			Log($"layout Mulligan cards={entries.Count} centre={centreX:0} spread={spread:0} " +
+				$"centreY={centreY:0}");
+
+			for(var i = 0; i < entries.Count; i++)
+			{
+				var e = entries[i];
+				var x = centreX + (i - (entries.Count - 1) / 2.0) * spread;
+
+				var keep = e.Stats == null
+					? "–"
+					: $"{e.Stats.Value.KeepWinRate:0.#}%";
+				var head = BuildLabel(keep, dimmed: e.Stats == null);
+				head.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+				Canvas.SetLeft(head, x - head.DesiredSize.Width / 2.0);
+				Canvas.SetTop(head, centreY);
+				_canvas.Children.Add(head);
+
+				// The gauge under the number, drawn by us rather than borrowed: HDT's own red-to-green
+				// bar has no settable properties and its view-model demands an HSReplay mulligan-guide
+				// response object, so driving it would mean dressing Firestone-derived numbers as data
+				// from a product that does not publish arena mulligan stats at all.
+				var gaugeY = centreY + head.DesiredSize.Height + 2.0;
+				if(e.Stats != null)
+				{
+					var gauge = BuildKeepGauge(e.Stats.Value);
+					Canvas.SetLeft(gauge, x - MulliganGaugeWidth / 2.0);
+					Canvas.SetTop(gauge, gaugeY);
+					_canvas.Children.Add(gauge);
+					gaugeY += MulliganGaugeHeight + 3.0;
+				}
+
+				// Keep rate and sample size on the quiet line: they qualify the number above rather
+				// than competing with it, and the sample size is the reader's own confidence check.
+				var detail = e.Stats == null
+					? "too few games"
+					: $"kept {e.Stats.Value.KeepRate:0}% · {e.Stats.Value.Games} games (est.)";
+				var sub = BuildReason(detail);
+				sub.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+				Canvas.SetLeft(sub, x - sub.DesiredSize.Width / 2.0);
+				Canvas.SetTop(sub, gaugeY);
+				_canvas.Children.Add(sub);
+
+				Log($"  mulligan[{i}] '{e.Label}' x={x:0} keepWr={keep} " +
+					$"games={(e.Stats?.Games.ToString() ?? "-")}");
+			}
+		}
+
+
+		// Gauge geometry, in design-space units like everything else on this canvas.
+		private const double MulliganGaugeWidth = 92.0;
+		private const double MulliganGaugeHeight = 7.0;
+		/// <summary>
+		/// Half-width of the window the gauge spans, in percentage points AROUND THE CLASS AVERAGE.
+		/// Arena keep win-rates cluster within a few points of 50, so a bar drawn on the absolute
+		/// 0-100 value would sit mid-track for every card and say nothing. Deliberately wide enough
+		/// that a card has to be genuinely better than its class's average keep to read as green.
+		/// </summary>
+		private const double MulliganGaugeSpanPoints = 6.0;
+
+		/// <summary>
+		/// A red-to-green bar for one card's keep win-rate, RELATIVE to that class's average keep.
+		/// The colour therefore means "better or worse than an average keep here", which is a claim
+		/// the data supports — an absolute colour scale would not be.
+		///
+		/// Not a confidence display: the sample size is stated in words next to it, because a colour
+		/// cannot say "measured on 40 games" and this feed is thin (see MulliganCardStats).
+		/// </summary>
+		private static FrameworkElement BuildKeepGauge(MulliganCardStats stats)
+		{
+			var delta = stats.KeepWinRate - stats.ClassAverage;
+			var t = Math.Max(0.0, Math.Min(1.0,
+				0.5 + delta / (2.0 * MulliganGaugeSpanPoints)));
+
+			var track = new Border
+			{
+				Width = MulliganGaugeWidth,
+				Height = MulliganGaugeHeight,
+				CornerRadius = new CornerRadius(MulliganGaugeHeight / 2.0),
+				Background = new SolidColorBrush(Color.FromArgb(0x66, 0x10, 0x10, 0x12)),
+				BorderThickness = new Thickness(1),
+				BorderBrush = new SolidColorBrush(Color.FromArgb(0x88, 0, 0, 0)),
+			};
+			var fill = new Border
+			{
+				Width = Math.Max(MulliganGaugeHeight, MulliganGaugeWidth * t),
+				Height = MulliganGaugeHeight,
+				CornerRadius = new CornerRadius(MulliganGaugeHeight / 2.0),
+				HorizontalAlignment = HorizontalAlignment.Left,
+				Background = new SolidColorBrush(GaugeColor(t)),
+			};
+			track.Child = fill;
+			return track;
+		}
+
+		/// <summary>Red at the bottom of the window, amber at the class average, green at the top.</summary>
+		private static Color GaugeColor(double t)
+		{
+			var low = Color.FromRgb(0xf8, 0x2a, 0x1e);   // red
+			var mid = Color.FromRgb(0xf2, 0xc0, 0x2c);   // amber, i.e. an average keep
+			var high = Color.FromRgb(0x3f, 0xd0, 0x66);  // green
+			return t < 0.5
+				? Lerp(low, mid, t / 0.5)
+				: Lerp(mid, high, (t - 0.5) / 0.5);
+		}
+
+		private static Color Lerp(Color a, Color b, double t)
+			=> Color.FromRgb(
+				(byte)Math.Round(a.R + (b.R - a.R) * t),
+				(byte)Math.Round(a.G + (b.G - a.G) * t),
+				(byte)Math.Round(a.B + (b.B - a.B) * t));
 
 		/// <summary>
 		/// Render the redraft edit phase's deck panel: EVERY card in the deck, in the game's own

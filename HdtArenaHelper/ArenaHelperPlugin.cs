@@ -47,6 +47,11 @@ namespace HdtArenaHelper
 		}
 
 		private readonly DraftWatcher _watcher = new DraftWatcher();
+		// In-game choices (Discover). A separate watcher, not a branch of DraftWatcher: it polls a
+		// different client structure and is gated on a different scene, and the draft path's two
+		// ghost-overlay bugs both came from one gate serving two screens.
+		private readonly CardChoiceWatcher _choiceWatcher = new CardChoiceWatcher();
+		private readonly MulliganWatcher _mulliganWatcher = new MulliganWatcher();
 		// Card map builds lazily on first use, so constructing at OnLoad (HearthDb may
 		// still be empty) is safe.
 		private readonly MetadataSynergyEngine _synergy = new MetadataSynergyEngine();
@@ -80,10 +85,11 @@ namespace HdtArenaHelper
 		// loop could pass the check, get preempted by a Refresh (bump + reset), then
 		// stamp _dataReady with the OLD aggregator's verdict.
 		private readonly object _warmLock = new object();
-		private DraftChoicesEventArgs? _lastChoices; // current pick (null between picks)
-		private DeckReviewEventArgs? _lastReview;    // current redraft deck-edit (mutually exclusive with a pick)
-		private DraftChoicesEventArgs? _renderedChoices; // what the overlay currently shows
-		private DeckReviewEventArgs? _renderedReview;    // deck-review the overlay currently shows
+		// ONE active screen, not four nullable fields: the screens are mutually exclusive, and the old
+		// shape maintained that in two places (every handler AND every render branch nulled the
+		// siblings), so missing one left a stale screen up.
+		private object? _activeScreen;   // DraftChoices | DeckReview | CardChoice | Mulligan event args
+		private object? _renderedScreen; // the instance the overlay was last built from
 		private bool _renderedReady;                 // data-ready state the overlay was built with
 		private int _renderedSources;                // LoadedSourceCount the overlay was built with
 
@@ -100,9 +106,13 @@ namespace HdtArenaHelper
 				WireSynergy(aggregator);
 				_aggregator = aggregator;
 
-				_watcher.OnChoicesChanged += OnChoicesChanged;
+					_watcher.OnChoicesChanged += OnChoicesChanged;
 				_watcher.OnDeckReview += OnDeckReviewChanged;
 				_watcher.OnDraftEnded += OnDraftEnded;
+				_choiceWatcher.OnChoicesChanged += OnCardChoiceChanged;
+				_choiceWatcher.OnChoicesGone += OnCardChoiceGone;
+				_mulliganWatcher.OnMulligan += OnMulliganChanged;
+				_mulliganWatcher.OnMulliganGone += OnMulliganGone;
 
 				// Clear watcher + pick/render state so a stale pick can't bleed in.
 				ResetDraftState();
@@ -129,9 +139,27 @@ namespace HdtArenaHelper
 
 		public void OnUnload()
 		{
+			// Wrapped like OnLoad: Close() on a torn-down WPF window can throw, and the native-overlay
+			// restore below is the user's setting — it must be attempted even then.
+			try
+			{
+				OnUnloadCore();
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] OnUnload failed: " + ex);
+			}
+		}
+
+		private void OnUnloadCore()
+		{
 			_watcher.OnChoicesChanged -= OnChoicesChanged;
 			_watcher.OnDeckReview -= OnDeckReviewChanged;
 			_watcher.OnDraftEnded -= OnDraftEnded;
+			_choiceWatcher.OnChoicesChanged -= OnCardChoiceChanged;
+			_choiceWatcher.OnChoicesGone -= OnCardChoiceGone;
+			_mulliganWatcher.OnMulligan -= OnMulliganChanged;
+			_mulliganWatcher.OnMulliganGone -= OnMulliganGone;
 			// Abandon any in-flight update check before the DLL stops being ours to swap.
 			try { _updateCts?.Cancel(); }
 			catch(Exception ex) { Log.Error("[ArenaHelper] update cancel failed: " + ex.Message); }
@@ -154,32 +182,24 @@ namespace HdtArenaHelper
 				}
 
 				_watcher.Poll(); // fires OnChoicesChanged / OnDeckReview / OnDraftEnded on this thread
+				_choiceWatcher.Poll(); // fires OnCardChoiceChanged / OnCardChoiceGone on this thread
+				_mulliganWatcher.Poll(); // fires OnMulliganChanged / OnMulliganGone on this thread
 
-				var choices = _lastChoices;
-				var review = _lastReview; // mutually exclusive with a pick (the watcher clears the other)
-				var want = _dataReady && (choices != null || review != null);
+				var screen = _activeScreen;
+				var want = _dataReady && screen != null;
 
-				// (Re)build the overlay when the pick/deck changes OR when another data source
+				// (Re)build the overlay when the screen changes OR when another data source
 				// has come online since the last render (the heuristic is loaded instantly,
 				// so the first render may predate the win-rate downloads — a bool "ready"
 				// latch alone would leave those scores stale forever).
 				var loadedSources = _aggregator?.LoadedSourceCount ?? 0;
 				var readinessChanged = _dataReady != _renderedReady || loadedSources != _renderedSources;
-				if(want && choices != null && (!ReferenceEquals(choices, _renderedChoices) || readinessChanged))
+				if(want && (!ReferenceEquals(screen, _renderedScreen) || readinessChanged))
 				{
-					_renderedChoices = choices;
-					_renderedReview = null;
+					_renderedScreen = screen;
 					_renderedReady = _dataReady;
 					_renderedSources = loadedSources;
-					RenderContent(choices);
-				}
-				else if(want && review != null && (!ReferenceEquals(review, _renderedReview) || readinessChanged))
-				{
-					_renderedReview = review;
-					_renderedChoices = null;
-					_renderedReady = _dataReady;
-					_renderedSources = loadedSources;
-					RenderDeckReview(review);
+					RenderScreen(screen!);
 				}
 
 				_overlay?.UpdateVisibility(want);
@@ -216,7 +236,7 @@ namespace HdtArenaHelper
 			var aggregator = BuildAggregator();
 			WireSynergy(aggregator);
 			_aggregator = aggregator; // publish only once fully wired
-			_renderedChoices = null; // force a re-render once fresh data is in
+			_renderedScreen = null; // force a re-render once fresh data is in
 			WarmData();
 		}
 
@@ -574,35 +594,180 @@ namespace HdtArenaHelper
 		private void ResetDraftState()
 		{
 			_watcher.Reset();
-			_lastChoices = null;
-			_lastReview = null;
-			_renderedChoices = null;
-			_renderedReview = null;
+			_choiceWatcher.Reset();
+			_mulliganWatcher.Reset();
+			_activeScreen = null;
+			_renderedScreen = null;
 			_renderedReady = false;
 			_renderedSources = 0;
 		}
 
 		private void OnChoicesChanged(object sender, DraftChoicesEventArgs e)
 		{
-			_lastChoices = e;
-			_lastReview = null; // a pick and a deck-edit are different screens; never show both
+			// One field, so a pick REPLACES a deck-edit rather than having to remember to clear it.
+			_activeScreen = e;
 			Log.Info($"[ArenaHelper] choices changed: {e.Offered.Count} offered, " +
 				$"{e.DraftedDbfIds.Count} drafted, underground={e.IsUnderground}");
 		}
 
 		private void OnDeckReviewChanged(object sender, DeckReviewEventArgs e)
 		{
-			_lastReview = e;
-			_lastChoices = null;
+			_activeScreen = e;
 			Log.Info($"[ArenaHelper] deck review: {e.Deck.Count} cards, " +
 				$"class={e.DraftClass}, underground={e.IsUnderground}");
 		}
 
 		private void OnDraftEnded(object sender, EventArgs e)
 		{
-			_lastChoices = null;
-			_lastReview = null;
+			ClearScreen<DraftChoicesEventArgs>();
+			ClearScreen<DeckReviewEventArgs>();
 			Log.Info("[ArenaHelper] draft ended");
+		}
+
+		/// <summary>
+		/// The per-source breakdown of a score, for the log: which feed said what, at which effective
+		/// weight, on how many games, plus the synergy nudge. Shared by every render path because the
+		/// pick path used to log only the final number — and then "why is this card 54 and that one
+		/// 69" could not be answered from the log at all, which is the one place it should be.
+		/// </summary>
+		private static string DescribeScore(BlendedScore s)
+		{
+			var parts = s.HasData
+				? string.Join(" ", s.Components.Select(c =>
+					$"{c.SourceName}={Math.Round(c.NormalizedScore)}(w{c.Weight:0.00}" +
+					$"{(c.Games.HasValue ? ",g" + c.Games : "")})"))
+				: "no data";
+			var syn = Math.Abs(s.SynergyBonus) >= 0.05
+				? $" syn={s.SynergyBonus:+0.0;-0.0}{(s.SynergyReason != null ? " '" + s.SynergyReason + "'" : "")}"
+				: "";
+			return $"[{parts}]{syn}";
+		}
+
+		private void OnCardChoiceChanged(object sender, CardChoiceEventArgs e) => _activeScreen = e;
+
+		private void OnCardChoiceGone(object sender, EventArgs e)
+			=> ClearScreen<CardChoiceEventArgs>();
+
+		private void OnMulliganChanged(object sender, MulliganEventArgs e) => _activeScreen = e;
+
+		private void OnMulliganGone(object sender, EventArgs e) => ClearScreen<MulliganEventArgs>();
+
+		/// <summary>
+		/// Drop the active screen only if it is still the KIND that just ended. Without the type
+		/// check, the draft watcher leaving the DRAFT scene would also wipe a mulligan that the
+		/// in-game watcher had just put up — the two watchers run on the same tick and each only
+		/// speaks for its own screens.
+		/// </summary>
+		private void ClearScreen<T>() where T : class
+		{
+			if(!(_activeScreen is T))
+				return;
+			_activeScreen = null;
+			_renderedScreen = null;
+		}
+
+		/// <summary>Render whichever screen is active. One place where the four kinds are named.</summary>
+		private void RenderScreen(object screen)
+		{
+			switch(screen)
+			{
+				case DraftChoicesEventArgs choices:
+					RenderContent(choices);
+					break;
+				case DeckReviewEventArgs review:
+					RenderDeckReview(review);
+					break;
+				case CardChoiceEventArgs cardChoice:
+					RenderCardChoice(cardChoice);
+					break;
+				case MulliganEventArgs mulligan:
+					RenderMulligan(mulligan);
+					break;
+			}
+		}
+
+		/// <summary>
+		/// Snapshot the board from HDT's own game state. Wrapped in try/catch and defaulting to
+		/// "unknown" — a board we cannot read must make every rule silent rather than print a
+		/// confident "needs 7 mana, you have 0" over a game that is perfectly playable.
+		/// </summary>
+		private static GameStateSnapshot ReadGameState()
+		{
+			try
+			{
+				var game = Core.Game;
+				var entity = game?.PlayerEntity;
+				if(game == null || entity == null)
+					return GameStateSnapshot.Unknown;
+
+				// Crystals minus what this turn already spent, plus the temporary mana a coin or a
+				// ritual added — the same three tags the client itself displays.
+				var mana = entity.GetTag(HearthDb.Enums.GameTag.RESOURCES)
+					- entity.GetTag(HearthDb.Enums.GameTag.RESOURCES_USED)
+					+ entity.GetTag(HearthDb.Enums.GameTag.TEMP_RESOURCES);
+
+				return new GameStateSnapshot(
+					availableMana: Math.Max(0, mana),
+					handCount: game.PlayerHandCount,
+					maxHandSize: game.Player?.MaxHandSize ?? 0,
+					friendlyMinions: game.PlayerMinionCount,
+					maxBoardSize: 0);
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] could not read game state: " + ex.Message);
+				return GameStateSnapshot.Unknown;
+			}
+		}
+
+		// Runs on the UI thread. Shows each opening-hand card's keep record for the drafted class.
+		// Unlike every other screen this is NOT the blended score: it is a single source's
+		// percentage points, so it is rendered separately and labelled as an estimate.
+		private void RenderMulligan(MulliganEventArgs e)
+		{
+			var aggregator = _aggregator;
+			if(aggregator == null || _overlay == null)
+				return;
+
+			var stats = aggregator.Sources.OfType<IMulliganStatsSource>().FirstOrDefault();
+			var entries = new List<MulliganOverlayEntry>();
+			foreach(var dbfId in e.HandDbfIds)
+			{
+				var dbCard = HearthDb.Cards.GetFromDbfId(dbfId);
+				var name = dbCard != null ? ResolveName(dbCard.Id) : dbfId.ToString();
+				entries.Add(new MulliganOverlayEntry(name, stats?.GetMulliganStats(e.DeckClass, dbfId)));
+			}
+
+			_overlay.SetMulligan(entries);
+			Log.Info($"[ArenaHelper] rendered mulligan: {entries.Count} cards, class={e.DeckClass}, " +
+				$"withStats={entries.Count(x => x.Stats != null)}");
+		}
+
+		// Runs on the UI thread. Scores an in-game card choice (Discover) with the SAME engine the
+		// draft uses, in the run deck's class context and with the deck as synergy context. The board
+		// state is reported in WORDS beside the score and never folded into it: what the rules make
+		// objective is whether a card is castable or would be lost, not how many points that is worth.
+		private void RenderCardChoice(CardChoiceEventArgs e)
+		{
+			if(_aggregator == null || _overlay == null)
+				return;
+
+			var state = ReadGameState();
+			var entries = new List<OverlayEntry>();
+			foreach(var dbfId in e.OfferedDbfIds)
+			{
+				var score = _aggregator.Score(dbfId, e.DeckDbfIds, e.DeckClass);
+				var dbCard = HearthDb.Cards.GetFromDbfId(dbfId);
+				var name = dbCard != null ? ResolveName(dbCard.Id) : dbfId.ToString();
+				var fact = GameStateFacts.Describe(dbCard, state);
+				entries.Add(new OverlayEntry(name, score, cost: -1, note: fact));
+				Log.Info($"[ArenaHelper] choice {name} dbf={dbfId} " +
+					$"score={(score.HasData ? Math.Round(score.Value).ToString() : "-")} {DescribeScore(score)}" +
+					$"{(fact != null ? $" board='{fact}'" : "")}");
+			}
+
+			_overlay.SetEntries(entries, OverlayLayout.InGameChoice);
+			Log.Info($"[ArenaHelper] rendered {entries.Count} in-game choices class={e.DeckClass}");
 		}
 
 		// Runs on the UI thread (called from OnUpdate). Builds the plaques for the current
@@ -630,11 +795,12 @@ namespace HdtArenaHelper
 				var note = isHeroPick ? ClassWinRateNote(option.CardId) : null;
 				entries.Add(new OverlayEntry(label, score, cost: -1, note: note));
 				Log.Info($"[ArenaHelper] option {option.CardId} dbf={option.DbfId} pkg={option.PackageDbfIds.Count} " +
-					$"label='{label}' hasData={score.HasData} score={(score.HasData ? Math.Round(score.Value).ToString() : "-")}");
+					$"label='{label}' score={(score.HasData ? Math.Round(score.Value).ToString() : "-")} " +
+					DescribeScore(score));
 			}
 
 			_overlay.IsUnderground = e.IsUnderground;
-			_overlay.SetEntries(entries, isHeroPick);
+			_overlay.SetEntries(entries, isHeroPick ? OverlayLayout.HeroPick : OverlayLayout.CardDraft);
 			Log.Info($"[ArenaHelper] rendered {entries.Count} options heroPick={isHeroPick}");
 		}
 
@@ -676,15 +842,8 @@ namespace HdtArenaHelper
 			foreach(var x in fullRanked)
 			{
 				var s = x.Score;
-				var parts = s.HasData
-					? string.Join(" ", s.Components.Select(c =>
-						$"{c.SourceName}={Math.Round(c.NormalizedScore)}(w{c.Weight:0.00}{(c.Games.HasValue ? ",g" + c.Games : "")})"))
-					: "no data";
-				var syn = Math.Abs(s.SynergyBonus) >= 0.05
-					? $" syn={s.SynergyBonus:+0.0;-0.0}{(s.SynergyReason != null ? " '" + s.SynergyReason + "'" : "")}"
-					: "";
-				Log.Info($"[ArenaHelper]   deck-card {x.Label}: {(s.HasData ? Math.Round(s.Value).ToString() : "-")} " +
-					$"[{parts}]{syn}");
+				Log.Info($"[ArenaHelper]   deck-card {x.Label}: " +
+					$"{(s.HasData ? Math.Round(s.Value).ToString() : "-")} {DescribeScore(s)}");
 			}
 
 			// A raw ascending sort is NOT safe advice. Drawn win-rate rises with mana cost (measured
@@ -729,65 +888,15 @@ namespace HdtArenaHelper
 			Log.Info($"[ArenaHelper] deck-review rendered {ranked.Count} of {fullRanked.Count} cards");
 		}
 
-		// Underground "legendary group": the pick's value is the legendary PLUS its 3-card
-		// package, so score all four and average the ones we have data for (the average card
-		// quality you actually add to the deck).
-		/// <summary>
-		/// How far a legendary group's score leans toward its best card rather than its mean. The
-		/// bomb is the part you cannot get later; the filler is the part you can.
-		/// </summary>
-		private const double BestCardTilt = 0.35;
-
+		// Underground / normal-arena "legendary group": scored by LegendaryGroupScore, which is
+		// static and testable — the tilt below is a scoring rule and the provenance flag has been a
+		// bug three times, so both need tests that a private plugin method cannot have.
 		private BlendedScore ScoreGroup(DraftOption option, IReadOnlyCollection<int> draftedDbfIds,
 			HearthDb.Enums.CardClass draftClass)
-		{
-			if(_aggregator == null)
-				return BlendedScore.Empty;
-
-			var ids = new List<int> { option.DbfId };
-			ids.AddRange(option.PackageDbfIds);
-
-			// Score each card against the drafted deck PLUS the rest of its own group. The package
-			// is arriving together, so a tribal bundle (three Dragons behind a Dragon legendary)
-			// makes its own payoffs live — synergy the engine already computes but never saw here,
-			// because each card used to be scored against the drafted deck alone.
-			var values = new List<double>();
-			int? maxGames = null;
-			foreach(var id in ids)
-			{
-				var context = new List<int>(draftedDbfIds);
-				foreach(var other in ids)
-				{
-					if(other != id)
-						context.Add(other);
-				}
-				var s = _aggregator.Score(id, context, draftClass);
-				if(!s.HasData)
-					continue;
-				values.Add(s.Value);
-				// Carry the group's best sample so the confidence flag reflects the
-				// underlying data, not the synthesized "group avg" component.
-				if(s.MaxGames.HasValue && s.MaxGames.Value > (maxGames ?? -1))
-					maxGames = s.MaxGames;
-			}
-			if(values.Count == 0)
-				return BlendedScore.Empty;
-
-			// A mean answers "average card quality added", which is the right quantity but the wrong
-			// decision criterion for THIS pick: the first pick is the only guaranteed legendary of
-			// the run, while ~29 later picks can supply average bodies. A plain mean therefore
-			// prefers four solid cards over a bomb plus filler, which inverts how the choice
-			// actually plays. Tilt toward the best card in the group without ignoring the rest.
-			var mean = values.Average();
-			var best = values.Max();
-			var score = mean + BestCardTilt * (best - mean);
-			var components = new List<ScoreComponent>
-			{
-				new ScoreComponent($"group {values.Count}/{ids.Count} (avg {mean:0.#}, best {best:0.#})",
-					score, 1.0, maxGames)
-			};
-			return new BlendedScore(score, components, 0);
-		}
+			=> _aggregator == null
+				? BlendedScore.Empty
+				: LegendaryGroupScore.Score(_aggregator, option.DbfId, option.PackageDbfIds,
+					draftedDbfIds, draftClass);
 
 		/// <summary>
 		/// The offered class's estimated arena win-rate, as a line under the hero plaque. Consensus

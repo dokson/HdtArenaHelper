@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/global.json",
+  "//": "Pins the SDK so `dotnet build -warnaserror` means the same thing everywhere. This repo treats code-style rules as build ERRORS (see Directory.Build.props), and analyzer behaviour moves between SDK majors — so an unpinned SDK makes a green local build and a green CI build two different claims. Keep this in step with the dotnet-version in .github/workflows/*.yml.",
+  "sdk": {
+    "version": "10.0.102",
+    "rollForward": "latestFeature"
+  }
+}

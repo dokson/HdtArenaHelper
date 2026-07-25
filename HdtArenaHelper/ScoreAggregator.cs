@@ -16,12 +16,25 @@ namespace HdtArenaHelper
 		/// <summary>Games behind this source's estimate; null for model-based sources.</summary>
 		public int? Games { get; }
 
-		public ScoreComponent(string sourceName, double normalizedScore, double weight, int? games = null)
+		/// <summary>
+		/// True when this came from an empirical win-rate source, whether or not a per-card sample
+		/// size travelled with it. Games alone cannot answer that: a class TIER is real win-rate
+		/// data backed by a whole bucket rather than one card, so it carries no games — and reading
+		/// "no games" as "no data" made the hero pick claim its win-rates were unavailable while
+		/// displaying three of them, and star every class as low-confidence.
+		/// </summary>
+		public bool FromSample { get; }
+
+		// fromSample is REQUIRED, not defaulted: it silently inherited "false" three times, each time
+		// a real display bug. Every caller states whether its number came from real games.
+		public ScoreComponent(string sourceName, double normalizedScore, double weight,
+			int? games, bool fromSample)
 		{
 			SourceName = sourceName;
 			NormalizedScore = normalizedScore;
 			Weight = weight;
 			Games = games;
+			FromSample = fromSample;
 		}
 	}
 
@@ -62,10 +75,27 @@ namespace HdtArenaHelper
 			}
 		}
 
+		/// <summary>True when at least one empirical win-rate source contributed.</summary>
+		public bool HasWinRateData
+		{
+			get
+			{
+				foreach(var c in Components)
+				{
+					if(c.FromSample)
+						return true;
+				}
+				return false;
+			}
+		}
+
 		/// <summary>True when no real win-rate sample of meaningful size backs this score
 		/// (heuristic-only, or thin data): the overlay marks it so 50-ish scores from
-		/// solid data and from guesswork stop looking identical.</summary>
-		public bool IsLowConfidence => HasData && (MaxGames ?? 0) < LowConfidenceGames;
+		/// solid data and from guesswork stop looking identical. A win-rate source that reports no
+		/// per-card sample (the class tier at the hero pick) is NOT low confidence — it is backed by
+		/// a whole class bucket.</summary>
+		public bool IsLowConfidence => HasData && !HasWinRateData
+			|| HasData && MaxGames != null && MaxGames < LowConfidenceGames;
 
 		public BlendedScore(double value, IReadOnlyList<ScoreComponent> components,
 			double synergyBonus, string? synergyReason = null)
@@ -201,7 +231,8 @@ namespace HdtArenaHelper
 				var weight = score.Games == null
 					? source.Weight * modelFactor
 					: source.Weight * Confidence(score.Games);
-				components.Add(new ScoreComponent(source.Name, score.Score, weight, score.Games));
+				components.Add(new ScoreComponent(source.Name, score.Score, weight, score.Games,
+					fromSample: source.HasSamples));
 				weightedSum += score.Score * weight;
 				weightTotal += weight;
 			}

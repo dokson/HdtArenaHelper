@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageReference Include="MathNet.Numerics" />
   </ItemGroup>
 
   <!-- Reuse the plugin's BuildFeatures (shared, so train/inference features can't drift). -->

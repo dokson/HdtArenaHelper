@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'  # keep in step with global.json
 
       - name: Resolve pinned HDT reference assemblies
         id: hdt

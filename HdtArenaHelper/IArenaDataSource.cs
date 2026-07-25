@@ -67,6 +67,56 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
+	/// One card's mulligan record for a class: how often it is KEPT when offered, and the win-rate of
+	/// the games where it survived the mulligan.
+	///
+	/// <b>Not causal, and single-source.</b> A card is kept in hands that already look good, so a
+	/// high keep win-rate is partly the hand's quality and not the card's — and only Firestone
+	/// publishes these counters, so there is no second opinion to average against. Both facts must
+	/// reach the screen as presentation ("est.", the sample size), never be smoothed away.
+	/// </summary>
+	public readonly struct MulliganCardStats
+	{
+		/// <summary>Win-rate of games where the card was in hand after the mulligan, shrunk.</summary>
+		public double KeepWinRate { get; }
+		/// <summary>How often players keep it when it is offered, in percent, shrunk.</summary>
+		public double KeepRate { get; }
+		/// <summary>Games behind <see cref="KeepWinRate"/> — the honest confidence figure.</summary>
+		public int Games { get; }
+
+		/// <summary>
+		/// This CLASS's pooled keep win-rate, i.e. what an average keep looks like here. Carried with
+		/// the card because without it the card's own number cannot be read: arena keep win-rates all
+		/// cluster near 50%, so "55%" only means something against the class it is measured in — and a
+		/// colour or a bar drawn on the absolute value would look identical for every card.
+		/// </summary>
+		public double ClassAverage { get; }
+
+		public MulliganCardStats(double keepWinRate, double keepRate, int games, double classAverage)
+		{
+			KeepWinRate = keepWinRate;
+			KeepRate = keepRate;
+			Games = games;
+			ClassAverage = classAverage;
+		}
+	}
+
+	/// <summary>
+	/// A source that can report per-class mulligan statistics. Separate from
+	/// <see cref="IArenaDataSource"/> because these are not a 0-100 blend contribution: they are two
+	/// real-unit figures shown at the mulligan, on a different screen and a different decision.
+	/// </summary>
+	public interface IMulliganStatsSource
+	{
+		/// <summary>
+		/// The card's mulligan record in this class, or null when unknown or too thinly sampled to
+		/// state. Null means "show nothing": at the mulligan a missing number is honest, a noisy one
+		/// is a recommendation nobody can check.
+		/// </summary>
+		MulliganCardStats? GetMulliganStats(CardClass cls, int dbfId);
+	}
+
+	/// <summary>
 	/// How much of a class's card usage a tribe actually accounts for — "if I draft this Dragon
 	/// payoff as a Hunter, will Dragons ever show up?". Measured from the win-rate feed's per-class
 	/// popularity, so it is real data per patch rather than a hand-written table, and it is the one

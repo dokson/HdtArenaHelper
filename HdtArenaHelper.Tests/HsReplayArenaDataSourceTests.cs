@@ -123,7 +123,7 @@ namespace HdtArenaHelper.Tests
 		}
 
 		[Fact]
-		public async Task Duplicate_entries_keep_the_one_with_most_games()
+		public async Task Repeated_entries_for_one_card_are_summed_as_counts()
 		{
 			const string payload = @"{
 				""data"": { ""ALL"": [
@@ -132,8 +132,38 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			// 52.0 (9000 games) wins over 55.0 (5000 games).
-			Assert.Equal(52.0, source.GetRaw(Dbf("CS2_106"))!.DrawnWinrate);
+			// Games-weighted, NOT "keep the bigger entry" (which threw away 5000 real games) and NOT
+			// the mean of the two rates (which would weight 5000 games like 9000):
+			// (55*5000 + 52*9000) / 14000 = 53.071...
+			var raw = source.GetRaw(Dbf("CS2_106"))!;
+			Assert.Equal((55.0 * 5000 + 52.0 * 9000) / 14000, raw.DrawnWinrate!.Value, 6);
+			Assert.Equal(14000, raw.Games);
+		}
+
+		[Fact]
+		public async Task Two_printings_of_the_same_card_pool_their_samples()
+		{
+			// The reason the rule above matters: the feeds report different PRINTINGS of the same
+			// card (HSReplay says CORE_YOP_001, Firestone says YOP_001), so joining on the raw dbf id
+			// split 216 cards into one-source-only entries. Both printings must land on one identity,
+			// and either printing's dbf id must find it.
+			const string payload = @"{
+				""data"": { ""ALL"": [
+					{ ""card_id"": ""YOP_001"", ""drawn_win_rate"": 60.0, ""num_games"": 1000 },
+					{ ""card_id"": ""CORE_YOP_001"", ""drawn_win_rate"": 50.0, ""num_games"": 3000 }
+				] } }";
+			var source = await LoadAsync(payload);
+
+			Assert.NotNull(source.GetNormalizedScore(Dbf("YOP_001")));
+			Assert.NotNull(source.GetNormalizedScore(Dbf("CORE_YOP_001")));
+			Assert.Equal(
+				source.GetNormalizedScore(Dbf("YOP_001"))!.Value.Score,
+				source.GetNormalizedScore(Dbf("CORE_YOP_001"))!.Value.Score, 6);
+
+			// One pooled sample of 4000 games, at the games-weighted rate.
+			var canonical = source.GetRaw(Dbf("YOP_001")) ?? source.GetRaw(Dbf("CORE_YOP_001"))!;
+			Assert.Equal(4000, canonical.Games);
+			Assert.Equal((60.0 * 1000 + 50.0 * 3000) / 4000, canonical.DrawnWinrate!.Value, 6);
 		}
 
 		// Three classes with different average card win-rates -> a ranked tier list.

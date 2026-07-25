@@ -113,6 +113,27 @@ namespace HdtArenaHelper
 		/// <summary>Where the whole pool must sit: every game is one deck's win and another's loss.</summary>
 		public const double NeutralWinRate = 50.0;
 
+		/// <summary>
+		/// The prior a per-class rate should shrink toward: the card's OVERALL rate with that class's
+		/// own games subtracted out. Shrinking toward a prior that still contains the observation
+		/// would double-count it, which is the whole reason this exists.
+		///
+		/// Falls back to <paramref name="fallback"/> when the remainder is too thin to mean anything,
+		/// or when the arithmetic lands outside [0, 100] — which can happen from rounding on tiny
+		/// remainders and, since the feeds are untrusted input, from a poisoned rate. That guard used
+		/// to exist in the HSReplay path and NOT in Firestone's: the same policy implemented twice had
+		/// already drifted, which is precisely what this class exists to prevent.
+		/// </summary>
+		public static double LeaveOneOutTarget(double totalRate, int totalGames,
+			double subsetRate, int subsetGames, double fallback)
+		{
+			var remainingGames = totalGames - subsetGames;
+			if(remainingGames < MinGames)
+				return fallback;
+			var remaining = (totalGames * totalRate - subsetGames * subsetRate) / remainingGames;
+			return remaining >= 0 && remaining <= 100 ? remaining : fallback;
+		}
+
 		/// <summary>Median absolute deviation, scaled to a normal-consistent SD.</summary>
 		public static double RobustSigma(IEnumerable<double> values, double center)
 		{

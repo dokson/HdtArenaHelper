@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Central package management: every NuGet version lives HERE, once. Before this, xunit, its
+    runner and the Test SDK were pinned in three separate test projects and MathNet in two, so a
+    Dependabot bump touched several files and a partial one left the test projects on mismatched
+    SDKs — a failure that looks like a broken test, not like a version skew.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="MathNet.Numerics" Version="5.0.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+</Project>

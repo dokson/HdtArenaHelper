@@ -8,24 +8,56 @@ An open-source **Arena draft-helper plugin for [Hearthstone Deck Tracker](https:
 (HDT). During an Arena / Underground Arena draft it reads the three offered cards,
 computes a **single blended 0–100 score** for each, and shows them in an overlay.
 
+**Positioning** (keep the README consistent with this): a free alternative to HDT's own freemium
+arena assistant, with its OWN scoring algorithm fed by more than one provider — HSReplay is made
+by the tracker's authors, so relying on it alone would inherit a single view of the format. The
+audience includes players who do not follow the meta, which is why the score is one number with a
+stated reason and a stated confidence. **Never claim to be more accurate than the paid helper**:
+it has data we do not, and no benchmark against it exists. The claim is free, auditable, and
+explicit about its limits.
+
 **Status:** data pipeline, draft detection, multi-source blend and overlay are in place and
-**live-verified on a real HDT client**. The overlay hosts HDT's native `ArenaPlaque`, scales
-with the client (a `Viewbox` design-space, so resize/DPI are automatic), hides when HS is
-minimised, and covers the card draft, the hero/class pick, and the Underground "legendary
-group" pick (cumulative scoring). Two independent win-rate sources (HSReplay + Firestone)
-blend at runtime, cards are scored in the drafted class's context when known, and a
-bounded metadata synergy engine (`MetadataSynergyEngine`) nudges deck-fit.
+**live-verified on a real HDT client**. The overlay hosts HDT's native `ArenaPlaque`, scales with
+the client (a `Viewbox` design-space, so resize/DPI are automatic) and hides when HS is minimised.
+Covered: the card draft, the hero/class pick, the "legendary group" pick, the redraft deck review,
+and — in game — Discover choices and the mulligan. Two independent win-rate sources (HSReplay +
+Firestone) blend at runtime, joined by card IDENTITY so reprints pool; cards are scored in the
+drafted class's context when known; a bounded synergy engine nudges deck-fit; and the board's own
+constraints are reported in words rather than folded into the score.
 
 ## Data sources & ethics
 
-The plugin uses **only free, public data** and must never scrape a paywalled service or
-bundle/redistribute anyone's proprietary tier data.
+The plugin uses only data it is **entitled to use**, never merely data it can reach, and must
+never scrape a paywalled service or bundle/redistribute anyone's data.
+
+> **Publicly reachable is not licensed.** This section used to say "free, public data", which
+> quietly treated an open URL as a grant. It is not: absent a stated licence the default is no
+> permission. On 2026-07-25 Firestone's developer objected publicly to this project using their
+> CDN without asking — and he was right to. Verified at the time: their repos carry **no LICENSE**
+> and the site publishes no terms, so there is no document to read in our favour, only a
+> conversation to have. Consequences for anyone working here:
+>
+> - **Ask before adding a source**, and record the answer next to it in the table below.
+> - Never argue "it is public, so it is fair game" — that is the exact reasoning being objected to.
+> - If a provider says stop, stop. Every source must stay individually droppable: the blend already
+>   degrades to one feed, and the offline heuristic backstops the rest. Keep it that way.
+> - Automated traffic (CI retrains) is the most visible thing we do on someone else's
+>   infrastructure. Keep it rare, single-shot, and be ready to remove the schedule.
 
 | Source | What | Status |
 |---|---|---|
 | HSReplay arena `api/v1/arena/card_stats/free/` | Real arena win-rate / popularity per card + class tier list | ✅ used (win-rate consensus with Firestone, 0.5 each) |
 | HearthDb (bundled with HDT) | Card metadata for the offline heuristic + id resolution | ✅ used, offline |
 | Firestone public arena CDN | Real arena win-rate per class | ✅ used at runtime (second win-rate source) + offline in `training/` (weight fitting) |
+
+**Both feeds are UNDERGROUND-scoped, and short-windowed.** The HSReplay payload states its own
+filters — `ArenaGameTypeFilter.BGT_UNDERGROUND_ARENA`, `ArenaTimestampRangeFilter.LAST_4_DAYS`,
+`meta_period_id` — and Firestone's URL says `arena-underground/last-patch`. Two consequences worth
+holding on to: **no pre-patch games pollute the blend** (a concern that turns out to be already
+handled, on both sides), and a player in NORMAL arena is being scored from Underground games. The
+4-day window also explains the thin samples seen everywhere, which is an argument for the shrinkage
+already applied, not against it. `meta_period_id` is the ready-made hook if patch detection is ever
+wanted.
 
 The HSReplay endpoint **403s .NET's HTTP stack**: Cloudflare fingerprints the TLS
 ClientHello, and a browser User-Agent alone is NOT enough (verified — `WebClient` and
@@ -94,6 +126,11 @@ finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  sy
     calibration slope over the random holdout's), re-emitted every refit as
     `model_only_shrink_measured` in `metrics.json`; it is NOT a ratio of correlations, which is
     what an earlier version wrongly used. REPORT.md §6 has the numbers and why the two differ.
+  - **Provenance is explicit and REQUIRED** on every `ScoreComponent` (`fromSample`): "is this real
+    data" cannot be read off a per-card sample size, because a class tier and a synthesized legendary
+    group score are real win-rate data with no per-card `Games`. Reading `MaxGames` instead made the
+    overlay print "win-rate data unavailable" over three displayed win-rates and star every option as
+    low-confidence — **three times, in three places**, which is why the parameter has no default.
 - **Display scale.** Sources share a centre (median card → 50) but not a slope: the win-rate
   logistic is steeper (~+35 pts per robust-SD) than the heuristic (~+15), so a real win-rate
   dominates on disagreement even at equal weight. Intended — the heuristic is a backstop. Both
@@ -103,9 +140,12 @@ finalScore(card) = weightedMean( each source's normalized 0–100 score )  +  sy
 - **Legendary groups — first pick, in BOTH The Arena and The Underground.** The June-2025 rework
   brought them to normal arena, so this is not an Underground-only screen. Each option is a
   legendary plus a 3-card package. `DraftWatcher` reads `DraftChoices.Packages` (a
-  `List<List<Card>>` index-aligned to `Choices`) into `DraftOption.PackageDbfIds`; the shown score
-  is the **mean of the four cards'** scores that have data — "average card quality you add".
-  Intra-group synergy is deferred with `ISynergyEngine`. See `ArenaHelperPlugin.ScoreGroup`.
+  `List<List<Card>>` index-aligned to `Choices`) into `DraftOption.PackageDbfIds`. The score is NOT
+  the plain mean: it is `mean + 0.35·(best − mean)` (`LegendaryGroupScore.BestCardTilt`), because the
+  first pick is the run's only guaranteed legendary while ~29 later picks can supply average bodies —
+  a mean prefers four solid cards over a bomb plus filler, inverting how the choice plays. Each card
+  is scored against the drafted deck PLUS the rest of its own group, so a tribal bundle makes its own
+  payoffs live. See `LegendaryGroupScore` (static and tested; the plugin only delegates).
 
 ## Synergy engine
 
@@ -175,15 +215,21 @@ whole deck, on the UI thread.
 | File | Responsibility |
 |---|---|
 | `ArenaHelperPlugin.cs` | `IPlugin` entry point; wires sources, warms data off-thread with retry, drives all overlay render/visibility from `OnUpdate` (wrapped in try/catch), suppresses/restores HDT's native overlay via a persisted pref file |
-| `DraftWatcher.cs` | Reads offered cards + `Packages` via HearthMirror (`GetArenaDraftChoicesV3`), dedup by `Version`, throttled to 500ms, cardId→dbfId; `Reset()` on (re)enable. Gated FIRST on the active **scene** (`Reflection.Client.GetSceneMgrState()` == `SceneMode.DRAFT`) and only then on `ArenaSessionState` (draft/redraft only). **Both gates are load-bearing and each was added after a live ghost-overlay bug**: choices linger in client memory on other screens (landing page), and — verified in the HDT log — an unfinished redraft keeps reporting `EDITING_DECK` while the player is on the main menu or inside Battlegrounds, so the session state alone left the deck panel sitting on top of both. The scene read fails PERMISSIVE (falls back to the session gate) — a ghost panel gets reported, an overlay that never appears looks like a dead plugin and on `Choices.Count == 3` (animations expose partial lists). Post-loss redrafts are picks too: `IsRedraft`, with run deck + `RedraftDeck` as the synergy context. (Redraft is an **Underground** mechanic; the code handles it mode-agnostically rather than gating on `IsUnderground`, so it costs nothing if normal arena ever gets it — but do not document it as a normal-arena feature.) The redraft **`EDITING_DECK`** phase ("Edit Your Deck" / discard-to-30) has no pick — it fires `OnDeckReview` with the whole deck (deduped by content) so the overlay can rank the weakest cards to cut. **The panel's visibility must NOT hinge on the deck size**: the client reports this phase two different ways across sessions (both in the HDT log, same build) — `deckSize=30` flat with the 5 new cards already counted in, or `deckSize=35` counting down as cards are picked for discard. So `deckSize - 30` is 0 in the first form and an earlier version that expected the deck to shrink left the panel up forever. The count to cut comes from the **redraft list**, which starts at 5 in both forms; the panel hides when the phase ends |
+| `GameWatcher.cs` | Template method for everything that polls the client: the base owns the 500 ms throttle, the **scene gate** and log-once-per-failure-streak; subclasses implement only their client read (`PollCore`), their dedup key and their "screen gone" event. The gate is why the base exists rather than three copies — **both ghost-overlay bugs this project had came from a watcher acting on state belonging to another screen**, and the gate had already been copied byte-identical into two pollers. Deliberately NOT in the base: dedup and the gone-event, which genuinely differ (`DraftChoices.Version` vs an offered-id signature vs `EndDraft`'s showing-state semantics) |
+| `MulliganWatcher.cs` / mulligan stats | The mulligan screen: `GetMulliganState()` ordered by the client's `ZonePosition` (the overlay places one column per card, so a misordered or partial hand does not degrade — it lies), gated on GAMEPLAY + an arena run + a known class. The numbers come from the mulligan counters Firestone already publishes in the files we download anyway (`inHandAfterMulligan(ThenWin)`, `keptInMulligan`, `drawnBeforeMulligan`), so the feature adds **zero requests**. Shown as percentage points, NOT through the plaque, so a 55 here is not read as a 55 on the 0-100 scale. Three caveats are presentation, not something to smooth away: single-source (no consensus), **not causal** (a card is kept in hands that already look good), and thinly sampled — measured, a class has 69-268 cards with 30+ keep observations and Warrior only 13 above 100, so cards under the floor show a dash instead of a number |
+| `GameStateFacts.cs` | What the BOARD says about an in-game choice, in words beside the score and **never folded into it**: hand full (a discovered card is destroyed — reported first because it is the only irreversible one), board full for a minion, and cost above available mana. These follow from the rules, so they need no fitting; what no public data provides is their VALUE in points, and inventing one is the mistake REPORT.md already measured. An unreadable board makes every rule silent — the failure mode to avoid is printing "needs 7 mana, you have 0" over a playable turn |
+| `CardChoiceWatcher.cs` | In-game card choices (Discover): polls `GetCardChoices()`, gated FIRST on the active scene being `GAMEPLAY` and then on being in an ARENA run — every number here is an arena win-rate, so outside arena there is none we are entitled to show. Dedup is on the offered-id list (no `Version` field exists here). Pure decision extracted to `BuildChoicePlan` for testing, like `BuildDeckEditPlan`; **all** offered ids must resolve or the choice is voided, because plaques are laid out by index and a partial list puts every score on the wrong card |
+| `DraftWatcher.cs` | Reads offered cards + `Packages` via HearthMirror (`GetArenaDraftChoicesV3`), dedup by `Version`, throttled to 500ms, cardId→dbfId; `Reset()` on (re)enable. Gated FIRST on the active **scene** (`Reflection.Client.GetSceneMgrState()` == `SceneMode.DRAFT`) and only then on `ArenaSessionState` (draft/redraft only). **Both gates are load-bearing and each was added after a live ghost-overlay bug**: choices linger in client memory on other screens (landing page), and — verified in the HDT log — an unfinished redraft keeps reporting `EDITING_DECK` while the player is on the main menu or inside Battlegrounds, so the session state alone left the deck panel sitting on top of both. The scene read fails PERMISSIVE (falls back to the session gate): a ghost panel gets reported, while an overlay that never appears looks like a dead plugin. Also gated on `Choices.Count == 3` (animations expose partial lists). **The `Version` is consumed only once EVERY offered card resolves to a dbf id** — HearthDb is empty while HDT starts, so a draft already open at startup resolved nothing, fired an empty pick, showed a blank overlay and then deduped that pick forever; and a partially resolved pick would lay out N−1 plaques centred as if there were N, putting each score on the wrong card. Post-loss redrafts are picks too: `IsRedraft`, with run deck + `RedraftDeck` as the synergy context. (Redraft is an **Underground** mechanic; the code handles it mode-agnostically rather than gating on `IsUnderground`, so it costs nothing if normal arena ever gets it — but do not document it as a normal-arena feature.) The redraft **`EDITING_DECK`** phase ("Edit Your Deck" / discard-to-30) has no pick — it fires `OnDeckReview` with the whole deck (deduped by content) so the overlay can rank the weakest cards to cut. **The panel's visibility must NOT hinge on the deck size**: the client reports this phase two different ways across sessions (both in the HDT log, same build) — `deckSize=30` flat with the 5 new cards already counted in, or `deckSize=35` counting down as cards are picked for discard. So `deckSize - 30` is 0 in the first form and an earlier version that expected the deck to shrink left the panel up forever. The count to cut comes from the **redraft list**, which starts at 5 in both forms; the panel hides when the phase ends |
 | `IArenaDataSource.cs` / `ScoreAggregator.cs` | Multi-source blend → `BlendedScore` (drafted class threaded through); `LoadedSourceCount` drives partial rendering AND re-renders as late sources come online, `IsLoaded` ends the warm-up loop |
 | `HsReplayArenaDataSource.cs` | Real arena win-rate source; curl fetch, cache-then-download, gated on HearthDb being ready; per-class card scores + class tier |
 | `FirestoneArenaDataSource.cs` | Second real win-rate source: 11 per-class CDN files, plain .NET fetch, per-class fail-soft cache, pooled + per-class scores |
+| `CardIdentity.cs` | Collapses a card's REPRINTS onto one identity so the two feeds can be joined: they report different printings of the same card (`CORE_YOP_001` vs `YOP_001`), and joining on the raw dbf id left **216 cards with only one source** — precisely where the consensus is worth most. Grouped by `(name, class, type)` among **collectible** cards only (tokens reuse names; none is ever drafted), canonical = lowest dbf id for determinism. Anything unmapped keeps its own id: failing to merge costs a consensus, a wrong merge would pool two different cards' win-rates. Measured: name matching recovered 216/216 where id normalisation recovered 210, with zero ambiguous groups. Built lazily — HearthDb is empty at OnLoad. **Reprints are summed as COUNTS** (wins and games) in both parsers, never as an average of the two rates, which would weight a 1,000-game printing like a 3,000-game one; the scoring lookup canonicalizes too, but AFTER the hero-skin check, or a skin would collapse onto its base hero |
+| `PayloadGuard.cs` | Every downloaded payload is treated as **untrusted input**, because it is: the feeds are third-party endpoints that can serve whatever they like to whichever caller they like. **The invariant to preserve: no RCE path.** Parsing uses `JObject.Parse`/`Load` only — never `JsonConvert.DeserializeObject<T>` and never `TypeNameHandling`, which is the setting that turns a JSON document into a gadget chain; do not introduce either into a remote-data parse path. What the guard bounds, each one a real payload away: a **stack overflow** from deep nesting (HDT ships Newtonsoft **12.0.3**, whose `MaxDepth` default is *unlimited* — the 64 default arrives in 13.0.1 — and a StackOverflowException cannot be caught, so it takes the whole tracker down), a **gzip bomb** (Firestone's files are `.gz.json`; decompression is bounded, not trusted), an oversized body (`curl --max-filesize` + a byte cap), and **poisoned numbers** — out-of-range rates are DROPPED, not clamped, because a dropped row falls back to the other source while a clamped one asserts a value the feed never reported. The residual risk it cannot address is SUBTLE poisoning (shifting a class by 2pp is indistinguishable from a meta shift); the only mitigation there is the two-source consensus, which is one more reason never to end up on a single feed |
 | `ScoreMath.cs` | Shared statistical policy (shrinkage, median/MAD logistic) + hero-skin map, so the win-rate sources stay mutually calibrated |
 | `HeuristicArenaDataSource.cs` | Offline heuristic base value |
 | `ArenaCardScore.cs` | The per-option score record the overlay renders |
 | `PlaqueTier.cs` | Pure 0-100 score → 1-5 plaque tier map (WPF-free, unit-tested) |
-| `ISynergyEngine.cs` / `MetadataSynergyEngine.cs` | Synergy contract + the metadata engine: FUZZY synergy (curve/tribes/spell-school/weapons/locations/spell damage) clamped ±3, PLUS a separate larger dead-card penalty (a quest, or a tribal payoff drafted with none of its tribe, progress-scaled) that can reorder a pick. All tribe/school patterns are **precompiled** and each card's text is cleaned **once** per call: the static `Regex.IsMatch` cache holds 15 entries and this engine has 19 patterns, so the naive form re-parsed nearly every pattern per drafted card — which the deck-review panel multiplies by the whole deck, on the UI thread |
+| `ISynergyEngine.cs` / `MetadataSynergyEngine.cs` | Synergy contract + the metadata engine. Rules, bounds and the traps behind each guard: see **Synergy engine** above — do not restate them here |
 | `ArenaOverlayWindow.cs` | Borderless click-through overlay hosting HDT's native `ArenaPlaque` (hand-drawn fallback) in a 4:3 `Viewbox` design-space; class/name label under each plaque; `SetDeckReview` renders the redraft edit phase's deck panel — the WHOLE deck in the game's order (cost, then name) with an HDT-style score badge per row and the suggested cuts shaded red-to-yellow by cut rank, as a full-height column on the LEFT edge (rows share the client height; clamped so a row can neither clip the badge nor stretch into a menu); poll-driven show/hide. **Do not try to align badges onto the game's own "Your Deck" list**: measured live, the redraft deck has 23–28 distinct rows against the ~21 that list shows, so it always scrolls, and the scroll offset is not readable from the client. That version was written, shipped dormant behind a 22-row guard, and never once fired |
 | `SelfUpdater.cs` | In-plugin auto-update over the public GitHub releases. **Two phases, deliberately:** a check (throttled 1×/day) downloads the bare `HdtArenaHelper.dll` release asset and only PARKS it as `*.dll.new`; `ApplyPendingUpdate()` performs the swap at the **next OnLoad**. Never swap when the download finishes — the check starts at load, so downloads often complete seconds before the user quits, and process death between the two moves leaves the folder with no `.dll`, which HDT can never repair (it loads only exact `.dll` files, so no plugin code runs again). At OnLoad the process has a whole session ahead of it. The swap renames the running (locked) DLL to `*.dll.old`: a loaded assembly cannot be overwritten or deleted but CAN be renamed on NTFS (verified empirically). Recovery retries with a `File.Copy` fallback and must never return without a DLL in place. Validation before anything is touched: MZ header, size cap, and the **managed assembly identity** (`AssemblyName.GetAssemblyName` must say `HdtArenaHelper`) — an MZ check alone accepts any PE, and installing the wrong one is an unloadable plugin. Asset URLs are host-checked (`IsTrustedAssetUrl`, GitHub HTTPS hosts only). Takes a `CancellationToken` cancelled from `OnUnload`. The previous version is KEPT as `*.dll.old` (the manual rollback), moved aside to `*.dll.old.prev` during a swap and only dropped once it succeeds — and promoted back if a swap died mid-dance. **Trust boundary**: bytes come only from this repo's official releases over HTTPS with no signature verification — the same trust as the user's original manual install. Fail-soft to a manual "open releases page" |
 | `HdtArenaHelper.Numerics/` | Pure maths — the scikit-learn-equivalent ridge solver and the descriptive statistics — with **no HDT/HearthDb/HearthMirror reference at all**. That isolation is the point: keep it that way, and never add an `HSDT.props` import here |
@@ -223,9 +269,19 @@ rescales everything — no per-size pixel maths. The window is glued to the clie
 every tick from `OnUpdate`: shown only while a pick is active AND the client exists and is not
 minimised, and never before data has loaded.
 
-**Anchors are live-tuned and must be re-checked after any HDT/HS layout change**: hero pick
-Y 0.43 / spread 0.29; card draft and legendary-group picks share one layout (Y 0.55, spread 0.26).
-Geometry and WPF layout cannot be verified offline — **always confirm rendering on a live client.**
+**Anchors are live-tuned and must be re-checked after any HDT/HS layout change.** Current values
+(fractions of the design space unless noted), each corrected on a real client at least once:
+
+| Screen | centre Y | spread | note |
+|---|---|---|---|
+| card draft / legendary group | 0.55 | 0.26 | one layout for both |
+| hero pick | 0.60 | 0.29 | below the client's own hero-name banner; 0.43 ran through it |
+| in-game Discover | 0.74 | 0.27 | BELOW the cards (drawn much larger than draft cards), centred on the FULL width — the draft's centre is offset left for the deck list, which in game does not exist |
+| mulligan | 0.22 | 0.20 | above the hand; lower put the gauge on the card art |
+| redraft deck panel | — | — | client-relative, LEFT edge, fills the height: top 0.015, bottom **0.075** (the client's own bottom bar lives there), row height clamped 24–48 DIP |
+
+Geometry and WPF layout cannot be verified offline — **always confirm rendering on a live client**,
+and the log prints every layout's coords (`layout <screen> … centreY=`) to correct them from.
 
 ## Runtime gotchas (verified live)
 
@@ -258,6 +314,11 @@ needs nothing but the repo, while `HdtArenaHelper.Tests` and `HdtArenaHelper.Tra
 HDT installed for HearthDb. Put a new test where its dependencies say, not where its subject lives —
 a pure-maths test that lands in the wrong project silently loses the no-HDT guarantee.
 
+`HdtArenaHelper.Tests` runs **sequentially** (`AssemblyInfo.cs`): the code under test logs through
+HDT's `Log.WriteLine`, whose queue is unsynchronised, so parallel logging classes corrupt it and
+throw from inside HDT — a CI-only failure while the same suite was green locally. Do not re-enable
+parallelisation there; put new plugin tests in that project regardless.
+
 Tests reference the HDT-shipped assemblies with `Private=True` (copied into the local
 test output only — still never redistributed). The heuristic golden-score tests pin the
 formula to the training tool's values: if an HDT update changes a card's text/stats,
@@ -267,6 +328,16 @@ recompute the affected goldens with `HdtArenaHelper.Training/`.
 compares `(major, minor, build)` only, so a 4-part hotfix tag would read as "not newer" on every
 installed client and reach nobody — and the updater is the recovery path for a bad release.
 `build.yml` rejects any other tag shape before publishing.
+
+**The SDK is pinned** in `global.json`, and the `dotnet-version` in every workflow must stay in step
+with it. This is not ceremony: `Directory.Build.props` turns code-style rules into build ERRORS, and
+analyzer behaviour moves between SDK majors — unpinned, a green local build and a green CI build are
+two different claims. It was already happening: local ran SDK 10 while CI pinned 8.
+
+**Package versions live only in `Directory.Packages.props`** (central package management). Adding a
+`Version=` attribute to a `PackageReference` is an error, not a style choice: the three test projects
+used to pin xunit and the Test SDK separately, so one Dependabot bump could leave them mismatched —
+which surfaces as a failing test, not as a version skew.
 
 `HSDT.props` auto-discovers HDT under `%LocalAppData%\HearthstoneDeckTracker\app-*`
 (override with `/p:HSDTPath=...`). The referenced HDT/HearthMirror/HearthDb/Newtonsoft

@@ -94,7 +94,7 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
-	/// Detects arena draft picks by polling HearthMirror. Call <see cref="Poll"/>
+	/// Detects arena draft picks by polling HearthMirror. Call <see cref="GameWatcher.Poll"/>
 	/// from the plugin's OnUpdate (~100ms). Fires <see cref="OnChoicesChanged"/>
 	/// only when a new set of choices appears (deduped by DraftChoices.Version),
 	/// mirroring HDT's own ArenaWatcher approach without depending on its internals.
@@ -102,97 +102,42 @@ namespace HdtArenaHelper
 	/// offered after a loss are already in the deck and 5 must go) it fires
 	/// <see cref="OnDeckReview"/> with the whole deck instead.
 	/// </summary>
-	public class DraftWatcher
+	public class DraftWatcher : GameWatcher
 	{
 		public event EventHandler<DraftChoicesEventArgs>? OnChoicesChanged;
 		public event EventHandler<DeckReviewEventArgs>? OnDeckReview;
 		public event EventHandler? OnDraftEnded;
 
-		private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
-
 		private int _lastVersion = int.MinValue;
 		private bool _wasDrafting;
-		private DateTime _nextPollUtc = DateTime.MinValue;
-		private bool _pollErrorLogged;
-		private bool _sceneErrorLogged;
+		private bool _unresolvedLogged;
 		private string? _lastReviewSig; // dedup the deck-edit review; re-fire when the deck changes
 
+		/// <summary>
+		/// The arena screens all live in the DRAFT scene. The gate is the base's, and it is
+		/// load-bearing: `ArenaSessionState` alone is not enough — with a redraft left unfinished the
+		/// client keeps reporting `EDITING_DECK` while the player is on the main menu or inside
+		/// Battlegrounds (both seen in the HDT log), which left the deck panel sitting on top of both.
+		/// </summary>
+		protected override SceneMode Scene => SceneMode.DRAFT;
+
+		/// <summary>Left the arena screens: hide whatever was up (fires OnDraftEnded once).</summary>
+		protected override void OnSceneLeft() => EndDraft();
+
 		/// <summary>Reset transient state; call from the plugin's OnLoad on (re)enable.</summary>
-		public void Reset()
+		public override void Reset()
 		{
+			base.Reset();
 			_lastVersion = int.MinValue;
 			_wasDrafting = false;
-			_nextPollUtc = DateTime.MinValue;
-			_pollErrorLogged = false;
-			_sceneErrorLogged = false;
+			_unresolvedLogged = false;
 			_lastReviewSig = null;
 		}
 
-		/// <summary>
-		/// True while Hearthstone is showing the arena draft scene (the card draft, the hero pick
-		/// and the redraft's "Edit Your Deck" all live there).
-		///
-		/// Fails PERMISSIVE on purpose: if the scene cannot be read we fall back to the session-state
-		/// gate alone rather than silently disabling the overlay for the whole session. A ghost panel
-		/// on the wrong screen is a visible annoyance the user reports; an overlay that never appears
-		/// looks like a broken plugin.
-		/// </summary>
-		private bool IsArenaSceneActive()
+
+		protected override void PollCore()
 		{
-			try
-			{
-				var scene = Reflection.Client.GetSceneMgrState();
-				if(scene == null)
-					return true;
-				return (SceneMode)scene.Value.Mode == SceneMode.DRAFT;
-			}
-			catch(Exception ex)
-			{
-				if(!_sceneErrorLogged)
-				{
-					_sceneErrorLogged = true;
-					Log($"scene state unavailable, scene gate disabled: {ex.Message}");
-				}
-				return true;
-			}
-		}
-
-		public void Poll()
-		{
-			// HDT calls OnUpdate ~10x/s; HDT's own ArenaWatcher polls at 500ms. Match that so we
-			// don't hammer the mono memory-reflection read continuously outside Arena.
-			var now = DateTime.UtcNow;
-			if(now < _nextPollUtc)
-				return;
-			_nextPollUtc = now + PollInterval;
-
-			// FIRST gate, before reading anything else: is the arena screen the one the player is
-			// actually looking at? VERIFIED LIVE that ArenaSessionState alone is not enough — with a
-			// redraft left unfinished the client keeps reporting EDITING_DECK while the player is on
-			// the main menu and inside Battlegrounds (both in the HDT log), so the deck panel sat on
-			// top of both for minutes. The scene manager is the authority on the current screen.
-			if(!IsArenaSceneActive())
-			{
-				EndDraft();
-				return;
-			}
-
-			DraftChoices? choices;
-			try
-			{
-				choices = Reflection.Client.GetArenaDraftChoicesV3();
-				_pollErrorLogged = false;
-			}
-			catch(Exception ex)
-			{
-				// HS starting/closing throws every tick - log once per failure streak, not 2x/s.
-				if(!_pollErrorLogged)
-				{
-					_pollErrorLogged = true;
-					Log($"GetArenaDraftChoices unavailable (retrying quietly): {ex.Message}");
-				}
-				return;
-			}
+			var choices = Reflection.Client.GetArenaDraftChoicesV3();
 
 			// Read the deck before concluding anything: in the redraft edit phase there are no
 			// choices, but GetArenaDeck reports EDITING_DECK and carries the deck to review.
@@ -239,8 +184,6 @@ namespace HdtArenaHelper
 
 			if(choices.Version == _lastVersion)
 				return;
-			_lastVersion = choices.Version;
-			_wasDrafting = true;
 
 			// Choices and Packages are index-aligned: Packages[i] is the 3-card bundle that
 			// comes with Choices[i] at the Underground legendary-group pick (empty otherwise).
@@ -264,6 +207,26 @@ namespace HdtArenaHelper
 				}
 				offered.Add(new DraftOption(choices.Choices[i].Id, dbf, package));
 			}
+
+			// EVERY offered card must resolve, and the Version is only consumed once it has. Two
+			// reasons, and the second was a live bug: partially resolved choices would lay out N-1
+			// plaques centred as if there were N, putting each score over the wrong card; and if
+			// HearthDb is not populated yet — which happens when HDT starts while a draft is already
+			// open — NOTHING resolves, so consuming the version first fired an empty pick, showed a
+			// blank overlay, and then deduped every later poll of that same pick forever.
+			if(offered.Count != choices.Choices.Count)
+			{
+				if(!_unresolvedLogged)
+				{
+					_unresolvedLogged = true;
+					Log($"choices not resolvable yet ({offered.Count}/{choices.Choices.Count}); " +
+						"retrying (HearthDb may still be loading)");
+				}
+				return;
+			}
+			_unresolvedLogged = false;
+			_lastVersion = choices.Version;
+			_wasDrafting = true;
 
 			// During a redraft (after losses, Underground AND Normal arena) the picks build
 			// the separate RedraftDeck on top of the existing run deck: both are the
@@ -449,7 +412,5 @@ namespace HdtArenaHelper
 				: HearthDb.Enums.CardClass.INVALID;
 		}
 
-		private static void Log(string msg)
-			=> Hearthstone_Deck_Tracker.Utility.Logging.Log.Info($"[ArenaHelper] {msg}");
 	}
 }

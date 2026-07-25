@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -35,7 +34,7 @@ namespace HdtArenaHelper
 	/// Plain .NET download (a static CDN — no Cloudflare fingerprinting here), one file
 	/// per class, each cached with a 1-day TTL; classes fail soft and independently.
 	/// </summary>
-	public class FirestoneArenaDataSource : IArenaDataSource, IClassWinRateSource
+	public class FirestoneArenaDataSource : IArenaDataSource, IClassWinRateSource, IMulliganStatsSource
 	{
 		// The Underground pool is used for BOTH arena modes on purpose: a card's drawn
 		// win-rate reflects its intrinsic quality, which is ~mode-invariant, and a classic
@@ -63,6 +62,7 @@ namespace HdtArenaHelper
 			public Dictionary<int, SourceScore> CardScore { get; }   // dbfId -> score+draws (pooled)
 			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100 (tier list)
 			public Dictionary<CardClass, double> ClassWinRate { get; } // class -> estimated win-rate %
+			public Dictionary<CardClass, Dictionary<int, MulliganCardStats>> Mulligan { get; }
 			public Dictionary<CardClass, Dictionary<int, SourceScore>> ClassCardScore { get; }
 			public Dictionary<int, CardClass> HeroClass { get; }
 			/// <summary>True when every class file backed this bundle. Lives INSIDE the
@@ -75,6 +75,7 @@ namespace HdtArenaHelper
 				Dictionary<int, SourceScore> cardScore,
 				Dictionary<CardClass, double> classScore,
 				Dictionary<CardClass, double> classWinRate,
+				Dictionary<CardClass, Dictionary<int, MulliganCardStats>> mulligan,
 				Dictionary<CardClass, Dictionary<int, SourceScore>> classCardScore,
 				Dictionary<int, CardClass> heroClass,
 				bool isComplete)
@@ -82,6 +83,7 @@ namespace HdtArenaHelper
 				CardScore = cardScore;
 				ClassScore = classScore;
 				ClassWinRate = classWinRate;
+				Mulligan = mulligan;
 				ClassCardScore = classCardScore;
 				HeroClass = heroClass;
 				IsComplete = isComplete;
@@ -99,6 +101,9 @@ namespace HdtArenaHelper
 		// because it counts DECKS containing the card, not draws, and the two must not be mixed.
 		private readonly Dictionary<CardClass, (double Wins, double Games)> _deckTally =
 			new Dictionary<CardClass, (double Wins, double Games)>();
+		// Mulligan counters per class: same files, a different question, so a separate map.
+		private readonly Dictionary<CardClass, Dictionary<int, MulliganTally>> _mulligan =
+			new Dictionary<CardClass, Dictionary<int, MulliganTally>>();
 
 		/// <param name="cacheDir">Directory for the per-class cache files (1-day TTL).</param>
 		/// <param name="weight">Relative blend weight; 0 disables the source.</param>
@@ -133,6 +138,17 @@ namespace HdtArenaHelper
 		/// <summary>Per-class estimated arena win-rate in percentage points, if loaded.</summary>
 		public IReadOnlyDictionary<CardClass, double>? ClassWinRates => _data?.ClassWinRate;
 
+		/// <inheritdoc/>
+		public MulliganCardStats? GetMulliganStats(CardClass cls, int dbfId)
+		{
+			var data = _data;
+			if(data == null || !data.Mulligan.TryGetValue(cls, out var cards))
+				return null;
+			return cards.TryGetValue(CardIdentity.Canonical(dbfId), out var stats)
+				? stats
+				: (MulliganCardStats?)null;
+		}
+
 		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
 		{
 			var data = _data; // read the published bundle once
@@ -141,18 +157,22 @@ namespace HdtArenaHelper
 
 			// Hero pick: rank the offered classes instead of a single card. A tier is
 			// backed by a whole class file, not one card's sample: no games discount.
+			// Before canonicalizing, so a hero skin is not collapsed onto its base hero.
 			if(data.HeroClass.TryGetValue(dbfId, out var heroClass))
 				return data.ClassScore.TryGetValue(heroClass, out var cs)
 					? new SourceScore(cs)
 					: (SourceScore?)null;
 
+			// The client reports whichever printing it has; the parsed maps are keyed by canonical.
+			var canonical = CardIdentity.Canonical(dbfId);
+
 			// Known drafted class: prefer the card's rate in that class's own file.
 			if(draftClass != CardClass.INVALID
 				&& data.ClassCardScore.TryGetValue(draftClass, out var perClass)
-				&& perClass.TryGetValue(dbfId, out var classScore))
+				&& perClass.TryGetValue(canonical, out var classScore))
 				return classScore;
 
-			return data.CardScore.TryGetValue(dbfId, out var score) ? score : (SourceScore?)null;
+			return data.CardScore.TryGetValue(canonical, out var score) ? score : (SourceScore?)null;
 		}
 
 		public async Task EnsureLoadedAsync()
@@ -198,11 +218,14 @@ namespace HdtArenaHelper
 					return;
 				}
 				var tally = ParseClassDeckTally(json);
+				var mulligan = ParseMulliganFile(json);
 				lock(_classLock)
 				{
 					_loaded[cardClass] = rates;
 					if(tally.Games > 0)
 						_deckTally[cardClass] = tally;
+					if(mulligan.Count > 0)
+						_mulligan[cardClass] = mulligan;
 					gotNew = true;
 				}
 			});
@@ -210,6 +233,7 @@ namespace HdtArenaHelper
 
 			Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>> snapshot;
 			Dictionary<CardClass, (double Wins, double Games)> tallies;
+			Dictionary<CardClass, Dictionary<int, MulliganTally>> mulliganSnapshot;
 			lock(_classLock)
 			{
 				if(!gotNew)
@@ -220,9 +244,11 @@ namespace HdtArenaHelper
 				}
 				snapshot = new Dictionary<CardClass, Dictionary<int, (double Rate, int Games)>>(_loaded);
 				tallies = new Dictionary<CardClass, (double Wins, double Games)>(_deckTally);
+				mulliganSnapshot = new Dictionary<CardClass, Dictionary<int, MulliganTally>>(_mulligan);
 			}
 
-			var data = BuildData(snapshot, tallies, isComplete: snapshot.Count >= _classes.Count);
+			var data = BuildData(snapshot, tallies, mulliganSnapshot,
+				isComplete: snapshot.Count >= _classes.Count);
 			_data = data; // single volatile publication: contents + completeness together
 			Log($"loaded {data.CardScore.Count} cards across {snapshot.Count}/{_classes.Count} classes");
 		}
@@ -232,6 +258,7 @@ namespace HdtArenaHelper
 		private static Data BuildData(
 			IReadOnlyDictionary<CardClass, Dictionary<int, (double Rate, int Games)>> perClass,
 			IReadOnlyDictionary<CardClass, (double Wins, double Games)> deckTallies,
+			IReadOnlyDictionary<CardClass, Dictionary<int, MulliganTally>> mulliganTallies,
 			bool isComplete)
 		{
 			// Pooled rate per card: total wins / total draws across all class files.
@@ -275,14 +302,11 @@ namespace HdtArenaHelper
 				{
 					if(kv.Value.Games < ScoreMath.MinGames)
 						continue;
-					var looDrawn = drawn[kv.Key] - kv.Value.Games;
-					double target;
-					if(looDrawn >= ScoreMath.MinGames)
-						target = (wins[kv.Key] - kv.Value.Rate * kv.Value.Games) / looDrawn;
-					else if(pooledShrunk.TryGetValue(kv.Key, out var pooled))
-						target = pooled;
-					else
-						target = globalMean;
+					var fallback = pooledShrunk.TryGetValue(kv.Key, out var pooled) ? pooled : globalMean;
+					// Same policy as HSReplay's path, from one implementation: see
+					// ScoreMath.LeaveOneOutTarget for why the remainder is range-guarded.
+					var target = ScoreMath.LeaveOneOutTarget(wins[kv.Key] / drawn[kv.Key],
+						drawn[kv.Key], kv.Value.Rate, kv.Value.Games, fallback);
 					shrunk[kv.Key] = ScoreMath.Shrink(kv.Value.Rate, kv.Value.Games, target);
 				}
 				if(shrunk.Count == 0)
@@ -302,6 +326,7 @@ namespace HdtArenaHelper
 				cardScore,
 				ScoreMath.ToScores(classTier),
 				ScoreMath.RecentreClassWinRates(deckTallies),
+				BuildMulligan(mulliganTallies),
 				classCardScore,
 				HeroSkins.BuildClassMap(),
 				isComplete);
@@ -322,7 +347,7 @@ namespace HdtArenaHelper
 			double wins = 0, games = 0;
 			try
 			{
-				if(!(JObject.Parse(json)["stats"] is JArray stats))
+				if(!(PayloadGuard.ParseObject(json)?["stats"] is JArray stats))
 					return (0, 0);
 
 				foreach(var entry in stats)
@@ -343,15 +368,20 @@ namespace HdtArenaHelper
 			return (wins, games);
 		}
 
-		/// <summary>dbf -> (drawn win-rate %, drawn games) for one class file. No noise
-		/// floor here — pooled and per-class floors are applied downstream, each on the
-		/// sample that actually backs the estimate.</summary>
-		private static Dictionary<int, (double Rate, int Games)> ParseClassFile(string json)
+
+		/// <summary>
+		/// One class file's MULLIGAN tallies per canonical card: the keep decision and its outcome.
+		///   - keep win-rate = <c>inHandAfterMulliganThenWin / inHandAfterMulligan</c>;
+		///   - keep rate     = <c>keptInMulligan / drawnBeforeMulligan</c>.
+		/// Raw counts only — shrinkage happens in <see cref="BuildMulligan"/> on the merged sample,
+		/// because reprints must pool before anything is smoothed.
+		/// </summary>
+		private static Dictionary<int, MulliganTally> ParseMulliganFile(string json)
 		{
-			var result = new Dictionary<int, (double, int)>();
+			var result = new Dictionary<int, MulliganTally>();
 			try
 			{
-				if(!(JObject.Parse(json)["stats"] is JArray stats))
+				if(!(PayloadGuard.ParseObject(json)?["stats"] is JArray stats))
 					return result;
 
 				foreach(var entry in stats)
@@ -361,17 +391,131 @@ namespace HdtArenaHelper
 						continue;
 					if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard) || dbCard.DbfId == 0)
 						continue;
+					var dbf = CardIdentity.Canonical(dbCard.DbfId);
+
+					var s = entry["stats"];
+					var kept = (double?)s?["inHandAfterMulligan"] ?? 0;
+					var keptWins = (double?)s?["inHandAfterMulliganThenWin"] ?? 0;
+					var keptCount = (double?)s?["keptInMulligan"] ?? 0;
+					var offered = (double?)s?["drawnBeforeMulligan"] ?? 0;
+					if(kept <= 0 && offered <= 0)
+						continue;
+
+					result.TryGetValue(dbf, out var seen);
+					result[dbf] = new MulliganTally(seen.KeptGames + kept, seen.KeptWins + keptWins,
+						seen.Kept + keptCount, seen.Offered + offered);
+				}
+			}
+			catch(Exception ex)
+			{
+				Log($"mulligan parse failed: {ex.Message}");
+			}
+			return result;
+		}
+
+		/// <summary>Raw mulligan counts for one card in one class, before any smoothing.</summary>
+		private readonly struct MulliganTally
+		{
+			public readonly double KeptGames;
+			public readonly double KeptWins;
+			public readonly double Kept;
+			public readonly double Offered;
+			public MulliganTally(double keptGames, double keptWins, double kept, double offered)
+			{
+				KeptGames = keptGames;
+				KeptWins = keptWins;
+				Kept = kept;
+				Offered = offered;
+			}
+		}
+
+		/// <summary>
+		/// Turns raw per-class tallies into shrunk, displayable stats. Shrinkage is not optional
+		/// here: measured on one payload, a class has between 69 and 268 cards with 30+ keep
+		/// observations, and Warrior has only 13 above 100 — a raw rate off 30 games swings ~9pp on
+		/// noise alone. Each card is pulled toward its CLASS's pooled rate, so a thin card says
+		/// "roughly average for this class" instead of asserting an outlier.
+		///
+		/// Cards under <see cref="ScoreMath.MinGames"/> keep observations are dropped entirely: at the
+		/// mulligan, no number is better than a number nobody can act on.
+		/// </summary>
+		private static Dictionary<CardClass, Dictionary<int, MulliganCardStats>> BuildMulligan(
+			IReadOnlyDictionary<CardClass, Dictionary<int, MulliganTally>> perClass)
+		{
+			var result = new Dictionary<CardClass, Dictionary<int, MulliganCardStats>>(perClass.Count);
+			foreach(var cls in perClass)
+			{
+				double poolWins = 0, poolGames = 0, poolKept = 0, poolOffered = 0;
+				foreach(var t in cls.Value.Values)
+				{
+					poolWins += t.KeptWins;
+					poolGames += t.KeptGames;
+					poolKept += t.Kept;
+					poolOffered += t.Offered;
+				}
+				if(poolGames <= 0)
+					continue;
+				var classKeepWr = 100.0 * poolWins / poolGames;
+				var classKeepRate = poolOffered > 0 ? 100.0 * poolKept / poolOffered : 50.0;
+
+				var cards = new Dictionary<int, MulliganCardStats>();
+				foreach(var kv in cls.Value)
+				{
+					var t = kv.Value;
+					if(t.KeptGames < ScoreMath.MinGames)
+						continue;
+					var keepWr = ScoreMath.Shrink(100.0 * t.KeptWins / t.KeptGames,
+						(int)t.KeptGames, classKeepWr);
+					var keepRate = t.Offered >= ScoreMath.MinGames
+						? ScoreMath.Shrink(100.0 * t.Kept / t.Offered, (int)t.Offered, classKeepRate)
+						: classKeepRate;
+					cards[kv.Key] = new MulliganCardStats(keepWr, keepRate, (int)t.KeptGames, classKeepWr);
+				}
+				if(cards.Count > 0)
+					result[cls.Key] = cards;
+			}
+			return result;
+		}
+
+		/// <summary>dbf -> (drawn win-rate %, drawn games) for one class file. No noise
+		/// floor here — pooled and per-class floors are applied downstream, each on the
+		/// sample that actually backs the estimate.</summary>
+		private static Dictionary<int, (double Rate, int Games)> ParseClassFile(string json)
+		{
+			var result = new Dictionary<int, (double, int)>();
+			try
+			{
+				if(!(PayloadGuard.ParseObject(json)?["stats"] is JArray stats))
+					return result;
+
+				foreach(var entry in stats)
+				{
+					var cardId = (string?)entry["cardId"];
+					if(string.IsNullOrEmpty(cardId))
+						continue;
+					if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard) || dbCard.DbfId == 0)
+						continue;
+					var dbf = CardIdentity.Canonical(dbCard.DbfId);
 
 					var s = entry["stats"];
 					var games = (int?)s?["drawn"] ?? 0;
 					var winsCount = (double?)s?["drawnThenWin"] ?? 0;
 					if(games <= 0)
 						continue;
-					// Duplicate card ids: keep the entry backed by the most games.
-					if(result.TryGetValue(dbCard.DbfId, out var existing) && existing.Item2 >= games)
-						continue;
 
-					result[dbCard.DbfId] = (winsCount / games * 100.0, games);
+					// REPRINTS ARE SUMMED as counts. The feeds disagree on which printing to report,
+					// so the same card arrives here (and from HSReplay) under different ids; keeping
+					// only the larger entry discarded real games, and averaging the two RATES would
+					// weight a thin printing like a thick one.
+					if(result.TryGetValue(dbf, out var existing))
+					{
+						var totalGames = existing.Item2 + games;
+						var totalWins = existing.Item1 / 100.0 * existing.Item2 + winsCount;
+						result[dbf] = (totalWins / totalGames * 100.0, totalGames);
+						continue;
+					}
+
+					result[dbf] = (winsCount / games * 100.0, games);
 				}
 			}
 			catch(Exception ex)
@@ -471,13 +615,12 @@ namespace HdtArenaHelper
 		// rather than trusting headers.
 		private static string Decode(byte[] bytes)
 		{
+			// Both paths are BOUNDED: this is third-party input, and a few KB of gzip can expand to
+			// gigabytes. An empty string reads downstream as "no usable data", which is already the
+			// fail-soft path (cache, other source, heuristic).
 			if(bytes.Length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
-			{
-				using(var gz = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress))
-				using(var reader = new StreamReader(gz, Encoding.UTF8))
-					return reader.ReadToEnd();
-			}
-			return Encoding.UTF8.GetString(bytes);
+				return PayloadGuard.Gunzip(bytes) ?? "";
+			return bytes.Length > PayloadGuard.MaxPayloadBytes ? "" : Encoding.UTF8.GetString(bytes);
 		}
 
 		private static void Log(string msg)

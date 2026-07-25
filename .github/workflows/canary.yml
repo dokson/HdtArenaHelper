@@ -14,6 +14,9 @@ on:
 jobs:
   canary:
     runs-on: windows-latest
+    # Read-only: this job publishes nothing. Unset would inherit the repo default (often write).
+    permissions:
+      contents: read
     env:
       GH_TOKEN: ${{ github.token }}
       # The pin build.yml/train.yml use, printed for comparison in the log.
@@ -23,7 +26,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'  # keep in step with global.json
 
       - name: Resolve LATEST official HDT release
         id: hdt

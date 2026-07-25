@@ -5,6 +5,93 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 0.1.3
+
+### Added
+
+- **In-game card choices (Discover).** The same scoring engine the draft uses, applied to the cards
+  a Discover offers, in your run deck's class context and with the deck as synergy context. Gated on
+  the active scene being gameplay AND on being in an arena run: every number here is an arena
+  win-rate, so outside arena there is none we are entitled to show.
+
+- **Board awareness on in-game choices.** A Discover now reports what the board makes impossible:
+  a card that cannot be cast this turn (with both numbers, since one mana short and five short are
+  different decisions), a minion with no room, and — first, because it is the only irreversible
+  one — a full hand, where the discovered card is destroyed. Deliberately words next to the score
+  and not points inside it: the rules make the facts objective, nothing public says what they are
+  worth, and the score already reads well without a guess bolted onto it.
+- **Mulligan guidance.** On the mulligan screen, each card's keep win-rate and how often players
+  keep it, for your drafted class, from counters already present in the data the plugin downloads
+  anyway — so it costs no extra requests. Presented as an estimate and qualified with its sample
+  size, because it is single-source, thinly sampled, and not causal: a card is kept in hands that
+  already look good, so part of a high keep win-rate is the hand rather than the card. Cards below
+  the sample floor show a dash instead of a number.
+
+### Changed
+
+- **The two win-rate feeds are now joined by card identity, not by printing.** They report different
+  printings of the same card (HSReplay `CORE_YOP_001`, Firestone `YOP_001`), which left **216 cards
+  scored by a single source** — exactly where a second opinion is worth most, and where the offline
+  heuristic silently gained influence. Cards covered by both feeds went from 1007 to 1219. Printings
+  are pooled as counts (wins and games), never as an average of two rates, which would weight a
+  thin printing like a thick one.
+- Hero plaques sit lower, below the client's own hero-name banner, where they no longer overlap it.
+- Internal structure, for the bug classes it removes rather than for tidiness: the three client
+  pollers now share one template (poll throttle, **scene gate**, log-once) — both ghost-overlay bugs
+  this project has had came from a watcher acting on another screen's state, and the gate had been
+  copy-pasted; the overlay's four mutually exclusive screens became one active-screen field, since
+  the "only one at a time" rule was previously maintained in two separate places that had to agree;
+  and the leave-one-out shrink prior moved into `ScoreMath`, which is where shared statistical policy
+  belongs — the two copies had already drifted, only one of them range-checking its result.
+
+### Build
+
+- The plugin test assembly runs sequentially. The code under test logs through HDT's own logger,
+  which enqueues into an unsynchronised queue, so two logging test classes in parallel corrupt it and
+  throw from inside HDT with a stack trace that looks like ours. It failed only in CI while the same
+  suite was green locally — core count decides whether the race is hit.
+- The .NET SDK is pinned (`global.json`) and every workflow aligned to it. The repo treats code-style
+  rules as build errors, and analyzer behaviour differs across SDK majors — with local on 10 and CI
+  on 8, a green build in the two places was not the same claim.
+- NuGet versions moved into `Directory.Packages.props`. Three test projects pinned xunit and the Test
+  SDK independently, so a partial bump could leave them mismatched — a skew that presents itself as a
+  failing test.
+
+### Security
+
+- The canary workflow now declares least-privilege permissions (`contents: read`). It publishes
+  nothing — it only reads another public repo's release tag — but an unset block inherits the repo
+  default, which is a write-scoped token in many configurations. Flagged by CodeQL.
+- Downloaded payloads are now treated as untrusted input. The parse path never used
+  `TypeNameHandling` or `DeserializeObject<T>`, so remote code execution was never reachable — that
+  is now written down as an invariant. What was reachable, and is now bounded: a stack overflow from
+  deeply nested JSON (the bundled Newtonsoft's depth limit is unlimited, and a stack overflow cannot
+  be caught — it would take the whole tracker down, not just the plugin), a gzip bomb via the
+  compressed per-class files, an oversized body, and out-of-range values, which are dropped rather
+  than clamped so a poisoned row falls back to the other source instead of asserting a number the
+  feed never reported.
+
+### Fixed
+
+- The overlay announced "win-rate data unavailable" — and starred every option as low-confidence —
+  over scores it had just derived from thousands of games, at the hero pick and on legendary groups.
+  Both read "is this real data" off a per-card sample size, which a class tier and a synthesized
+  group score legitimately do not carry. Provenance is now explicit and required at every
+  construction site, since the same bug appeared three times.
+- The overlay could stay blank for a whole draft if HDT started while a draft was already open:
+  the pick was consumed for dedup before its cards resolved, and HearthDb is empty at startup, so
+  nothing resolved and the pick was never retried. A pick is now consumed only once every offered
+  card resolves — which also prevents a partially resolved pick from putting each score on the
+  wrong card.
+
+### Docs
+
+- The data-source policy no longer says "free, public data": publicly reachable is not licensed.
+  Firestone's developer objected to this project using their CDN without asking, and was right to —
+  their repos carry no licence and the site publishes no terms, so there is no permission to infer.
+  Every source must stay individually droppable.
+- Both feeds are documented as Underground-scoped and short-windowed, which they always were.
+
 ## [0.1.2] - 2026-07-25
 
 ### Added
