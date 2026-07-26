@@ -1,3 +1,4 @@
+using HdtArenaHelper.CardDatabase;
 using HearthDb;
 using HearthDb.Enums;
 using Xunit;
@@ -17,33 +18,43 @@ namespace HdtArenaHelper.Tests
 			return source;
 		}
 
-		private static int Dbf(string cardId) => Cards.All[cardId].DbfId;
+		private static int Dbf(CardEntry card) => card.DbfId;
 
 		/// <summary>
 		/// Golden values verified against the C# training tool (HdtArenaHelper.Training),
 		/// which fits the embedded weights: the scorer must reproduce them exactly. When
 		/// the weights are re-fit (new patch/rotation) these move — recompute them by
 		/// re-running the trainer and reading the scores.
+		///
+		/// MemberData rather than InlineData because an attribute argument must be a compile-time
+		/// constant, and a named card is a property. The cases are worth naming: which card a golden
+		/// belongs to is the whole diagnostic value when one of them moves.
 		/// </summary>
-		[Theory]
-		[InlineData("LOOT_413", 24.63)] // Plated Beetle - vanilla-ish minion
-		[InlineData("CS2_189", 56.05)]  // Elven Archer - battlecry damage
-		[InlineData("EX1_093", 40.83)]  // Defender of Argus - buff + taunt text
-		[InlineData("CS2_106", 50.33)]  // Fiery War Axe - weapon path
-		[InlineData("CS2_029", 57.61)]  // Fireball - spell with damage magnitude
-		[InlineData("EX1_050", 43.29)]  // Coldlight Oracle - draw text
-		[InlineData("GIL_828", 50.88)]  // Dire Frenzy - buff spell
-		[InlineData("CS2_235", 47.36)]  // Northshire Cleric - persistent draw
-		[InlineData("EX1_046", 28.86)]  // Dark Iron Dwarf - conditional buff
-		// The LEGENDARY of the set, and a card whose statline is genuinely bad. It went 16.01 ->
-		// 5.12 when `is_legendary` was removed (the label alone had been worth ~10 display points),
-		// and it sits at the clamp floor under the single-source fit. A 0 here is not a bug: it is
-		// a 10-mana 12/12 that hands the opponent the board, scored by a model that no longer gets
-		// to like it for being rare.
-		[InlineData("NEW1_030", 0.00)]  // Deathwing - at the floor, where it belongs
-		public void Matches_training_golden_scores(string cardId, double expected)
+		public static TheoryData<CardEntry, double> Goldens => new TheoryData<CardEntry, double>
 		{
-			var score = Source.GetNormalizedScore(Dbf(cardId));
+			{ HSCard.PlatedBeetle, 24.63 },      // vanilla-ish minion
+			{ HSCard.ElvenArcher, 56.05 },       // battlecry damage
+			{ HSCard.DefenderOfArgus, 40.83 },   // buff + taunt text
+			{ HSCard.FieryWarAxe, 50.33 },       // the weapon path
+			{ HSCard.Fireball, 57.61 },          // spell with a damage magnitude
+			{ HSCard.ColdlightOracle, 43.29 },   // draw text
+			{ HSCard.DireFrenzy, 50.88 },        // buff spell
+			{ HSCard.NorthshireCleric, 47.36 },  // persistent draw
+			{ HSCard.DarkIronDwarf, 28.86 },     // conditional buff
+
+			// The LEGENDARY of the set, and a card whose statline is genuinely bad. It went 16.01 ->
+			// 5.12 when `is_legendary` was removed (the label alone had been worth ~10 display points),
+			// and it sits at the clamp floor under the single-source fit. A 0 here is not a bug: it is
+			// a 10-mana 12/12 that hands the opponent the board, scored by a model that no longer gets
+			// to like it for being rare.
+			{ HSCard.Deathwing, 0.00 },
+		};
+
+		[Theory]
+		[MemberData(nameof(Goldens))]
+		public void Matches_training_golden_scores(CardEntry card, double expected)
+		{
+			var score = Source.GetNormalizedScore(Dbf(card));
 
 			Assert.NotNull(score);
 			// Tolerance = half the trainer's printed precision (0.00): digit-rounding
@@ -62,8 +73,8 @@ namespace HdtArenaHelper.Tests
 		public void Class_pick_hero_skins_are_not_scored()
 		{
 			// The win-rate source rates these by class tier instead.
-			Assert.Null(Source.GetNormalizedScore(Dbf("HERO_01")));
-			Assert.Null(Source.GetNormalizedScore(Dbf("HERO_08")));
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream)));
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.JainaProudmoore)));
 		}
 
 		[Fact]
@@ -77,7 +88,7 @@ namespace HdtArenaHelper.Tests
 			// The cost of abstaining is near zero — hero cards are collectible, so the win-rate
 			// feeds cover them — and where nothing covers them the aggregator's shrink says 50,
 			// which is what "we do not know" should look like.
-			Assert.Null(Source.GetNormalizedScore(Dbf("ICC_833"))); // Frost Lich Jaina
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.FrostLichJaina)));
 		}
 
 		/// <summary>

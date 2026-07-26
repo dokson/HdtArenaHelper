@@ -30,4 +30,14 @@
     <ProjectReference Include="..\HdtArenaHelper.Numerics\HdtArenaHelper.Numerics.csproj" />
   </ItemGroup>
 
+  <!--
+    The generated card pool. Plain data with no HearthDb reference, so compiling it here does
+    NOT break the no-HDT guarantee above: these are the pool's own invariants (unique dbf ids,
+    total ordering, no hero powers), checkable without the card DB. Whether the file still
+    MATCHES HearthDb is a different question, asked by the drift test in HdtArenaHelper.Tests.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
+  </ItemGroup>
+
 </Project>

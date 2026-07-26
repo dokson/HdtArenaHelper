@@ -1,3 +1,4 @@
+using HdtArenaHelper.CardDatabase;
 using HearthDb;
 using Xunit;
 
@@ -10,10 +11,9 @@ namespace HdtArenaHelper.Tests
 	/// </summary>
 	public class GameStateFactsTests
 	{
-		// Chillwind Yeti (4-mana minion) and Flamestrike (7-mana spell): cost and type are all the
-		// rules below look at.
-		private static Card Minion4 => Cards.All["CS2_182"];
-		private static Card Spell7 => Cards.All["CS2_032"];
+		// Cost and type are all the rules below look at.
+		private static Card Minion4 => Cards.All[HSCard.ChillwindYeti.CardId];
+		private static Card Spell7 => Cards.All[HSCard.Flamestrike.CardId];
 
 		private static GameStateSnapshot Board(int mana, int hand = 5, int minions = 2)
 			=> new GameStateSnapshot(mana, hand, maxHandSize: 10, friendlyMinions: minions,

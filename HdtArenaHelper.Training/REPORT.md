@@ -490,6 +490,89 @@ That the trainer only *reports* it is the design working.
 `randomScores` is repeated) before anyone reads them run-over-run again. Until then they are direction,
 not measurement.
 
+### 15. Card-pool measurements behind the 0.1.6 synergy changes
+
+Every number here was measured by dumping the WHOLE collectible pool through the real engine and
+diffing two builds — not by re-implementing the patterns in a script. That distinction earned its
+place: a PowerShell replication of `DependencyPatterns` disagreed with production (it substituted
+`beasts?` where the engine substitutes `beast`) and sent the first version of a regression test at
+Frizz Kindleroost, a card the old patterns already caught, so the test passed with and without the
+fix and proved nothing. **Dump the pool through the engine; do not re-implement the engine.**
+
+These are pool-dependent and will move with rotation. Re-measure rather than trusting them.
+
+**Tooltip line breaks.** Card text carries the client's own line wraps as newlines and `CardText.Normalized`
+does not collapse them (it cannot: the heuristic's weights are fit against those exact bytes). **3594 of
+the 7300** collectible cards with text contain a newline. A literal space instead of `\s+` cost:
+
+| pattern set | effect of the literal space |
+|---|---|
+| summon-from-deck | fired on 4 of the 6 cards it exists for (missed Skydiving Instructor, Reinforcement Aura) |
+| `DependencyPatterns` / `GenerationPatterns` | **24 cards** scored differently once fixed |
+
+Of those 24: 22 gained the dead-card penalty they were dodging (Corrosive Breath 0.00 → −6.07, plus
+Molten/Lightning Breath, Stormhammer, Twilight Acolyte, Goblin Blastmage, Ini Stormcoil, Gentle
+Megasaur, Serpentbloom), and 2 correctly LOST it because their generation clause became visible (Lady
+Prestor, Boom Wrench). The whole suite was green before and after.
+
+**Summon-from-deck population.** 45 collectible cards summon from the deck; only **6** state a cheap
+limit and so may be judged by the 1-2 mana bucket (Apothecary's Caravan, Boogie Down, Reinforcement
+Aura, Scarlet Recruiter, Skydiving Instructor, Trusty Fishing Rod). 3 fetch a KNOWN card — themselves —
+and are excluded (Patches by "summon this", Persistent Peddler and Moragg by name).
+
+**Secret / Aura availability, per class.** Popularity-weighted from the per-class payload, same method
+as tribe availability (§12):
+
+| classes | Secret share of slots | expected in 20 picks |
+|---|---|---|
+| HUNTER / ROGUE / MAGE | 4.29% / 4.23% / 4.20% | ~0.85 |
+| the other **eight** | 0.00% | 0 |
+
+PALADIN measures **0%** while having Secrets in principle — the pool decides, which is the argument
+against a hard-coded class list. Only **21 of 118** collectible Secrets are in the current pool at all,
+and Eater of Secrets, Kezan Mystic and Sunreaver Spy are absent entirely. Worked example of the damping
+on a Mage at pick 10: 0.84 expected → factor 0.58; with the body factor (a 4/4 body) and progress 0.33,
+Chatty Bartender's penalty is ≈ **−0.34**, i.e. 64 → 63.7. The axis is right; it is not what makes that
+card score 64 — its measured drawn win-rate is 52.5% over 6076 games against a MAGE median of 51.3%.
+
+**Neutral Secret payoffs** are the population that matters, since a class card is only offered to its
+own class: of 27 neutral cards naming a Secret, the engine flags **10** as dependent, correctly excludes
+4 (anti-secret tech, and two that generate their own), and missed 2 on grammar (below).
+
+**Dependency grammar.** The patterns were written for tribe wordings and missed "the next Secret **you
+play**". Adding `{0}s? you play`, `{0}s? you played` and `next {0}\b`, measured across all 12 tribes plus
+both categories, flags **8 distinct cards** once the generation veto and own-membership guard apply —
+the Draenei cluster is excluded because those cards ARE Draenei, and Archimonde is vetoed (it depends on
+other cards GENERATING Demons, a dependency the engine cannot see). Still missed: Tiny Pal, whose "your
+Elemental Ammunition" is an adjective rather than a member reference.
+
+**Base-line exemption.** `HasUnconditionalClause` moved **50+ cards** from −6.07 to −1.52 — the entire
+"Deal N damage. If you're holding a Dragon…" family, plus Kill Command, Mirror Dimension and Nofin Can
+Stop Us. Cards whose ENTIRE text is the condition keep the full penalty (Elemental Evocation, Ancient
+Mysteries). Two threshold findings, both from reading the diff: a clause floor of 14 characters kept the
+full penalty on Grave Digging, whose base line is the 12-character "Draw 2 cards" (lowered to 10); and
+at 10, a continuation clause ("Draw a Secret. **It costs (0)**") wrongly exempted 3 cards, so clauses
+opening with a back-referring pronoun are rejected.
+
+**Hero powers.** All **2138** HERO_POWER cards classified from text: 262 `DirectDamage`, 219
+`HeroAttack`, 59 `ChargeToken`, 1598 `None`. Two pool-driven corrections: a GRANTED effect ("Give your
+minions 'Deathrattle: Summon a 2/1 Squashling with Rush'") summons nothing itself, and damage that
+cannot be AIMED ("to a random enemy", 35 cards) answers no particular minion. Of the eleven basic hero
+powers only **Fireblast and the Charge Ghoul** kill a one-health body for free; Shapeshift, Demon Claws
+and Dagger Mastery must swing the hero and eat its attack; Steady Shot and Ballista Shot are FACE-ONLY
+(HearthDb ships their text twice, once unrestricted — confirmed face-only by a player, reconciled via
+the repeated "Hero Power" label); and Reinforce does NOT answer a body, because a Silver Hand Recruit
+has no Charge. A from-memory class list had three of these wrong.
+
+**Display-scale observation, not yet acted on.** The 0-100 display is a logistic on ALL-anchored robust
+z, so a card at the median of a strong class reads well above 50: with the PALADIN median drawn
+win-rate at 52.4% against the pool's 49.1%, a *median* Paladin card computes to ≈69. Dance Floor at
+53.3% drawn (z +0.21 vs class, +0.60 vs pool) displays 78. The ordering is unaffected — it is ordinal —
+but the absolute numbers read higher than "78/100" suggests, and the deck-review panel is where this
+misleads most, since every card in a real deck lands in the 70s-80s. Anchoring on ALL is deliberate (it
+makes a class card and a neutral comparable at the same pick); the open question is whether the panel
+should show a class-relative number instead.
+
 ## Known limitations
 
 1. Target = win-rate of the deck that includes the card: correlational, not causal (draft

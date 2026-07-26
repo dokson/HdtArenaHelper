@@ -23,6 +23,17 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HdtArenaHelper\HdtArenaHelper.csproj" />
+    <!-- CardPoolDump.Build(), for the drift test — see CardPoolDumpDriftTests.cs. -->
+    <ProjectReference Include="..\HdtArenaHelper.Training\HdtArenaHelper.Training.csproj" />
+  </ItemGroup>
+
+  <!--
+    The generated card pool, compiled here so the drift test can compare it against the live
+    HearthDb this project already references. Never added to the PLUGIN csproj: the plugin reads
+    HearthDb at runtime, so committing 1.7 MB of the same data into the shipped DLL buys nothing.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
   </ItemGroup>
 
   <!--

@@ -136,6 +136,19 @@ namespace HdtArenaHelper
 		/// "zero availability" and must not guess.
 		/// </summary>
 		double? TribeShare(CardClass cls, Race race);
+
+		/// <summary>
+		/// The same question for a card CATEGORY identified by a TAG rather than a race — Secrets
+		/// (<see cref="GameTag.SECRET"/>) and Auras (<see cref="GameTag.PALADIN_AURA"/>). Those axes
+		/// are real dependencies too: "if you control a Secret" is as conditional as "if you control a
+		/// Dragon", and measured on the live pool the availability spread is even starker than for
+		/// tribes — Secrets are ~4.2% of MAGE, HUNTER and ROGUE slots and <b>0% of the other eight
+		/// classes</b>, so one flat penalty would be wrong in both directions at once.
+		///
+		/// Same contract as <see cref="TribeShare"/>: percent, or null when unknown, and null must
+		/// leave behaviour exactly as it was without the signal.
+		/// </summary>
+		double? CategoryShare(CardClass cls, GameTag tag);
 	}
 
 	/// <summary>

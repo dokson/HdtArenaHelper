@@ -48,6 +48,19 @@ jobs:
         shell: pwsh
         run: dotnet build HdtArenaHelper.sln -c Release -warnaserror "/p:HSDTPath=${{ steps.hdt.outputs.path }}"
 
+      # The using-order gate, and the only one that cannot live in the build. `dotnet build
+      # -warnaserror` already enforces every code-style rule in .editorconfig, but using ORDER is
+      # not a Roslyn diagnostic — `dotnet format` reports it as `IMPORTS`, so a scrambled using
+      # block compiles clean at 0 warnings. Verified by scrambling one deliberately.
+      # Restricted to `--severity error` on purpose: the whole solution carries ~160 info-level
+      # style suggestions that are advice (`:suggestion` in .editorconfig), and gating on those
+      # would fail the build on things the rule book explicitly does not require.
+      - name: Format check
+        shell: pwsh
+        run: dotnet format HdtArenaHelper.sln --verify-no-changes --severity error --no-restore
+        env:
+          HSDTPath: ${{ steps.hdt.outputs.path }}
+
       - name: Test
         shell: pwsh
         run: dotnet test HdtArenaHelper.Tests/HdtArenaHelper.Tests.csproj -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" --no-build

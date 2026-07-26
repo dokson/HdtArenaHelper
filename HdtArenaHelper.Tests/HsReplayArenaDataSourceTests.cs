@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
-using HearthDb;
+using HdtArenaHelper.CardDatabase;
 using HearthDb.Enums;
 using Xunit;
 
@@ -23,7 +23,12 @@ namespace HdtArenaHelper.Tests
 			try { Directory.Delete(_cacheDir, recursive: true); } catch { /* temp dir */ }
 		}
 
-		private static int Dbf(string cardId) => Cards.All[cardId].DbfId;
+		private static int Dbf(CardEntry card) => card.DbfId;
+
+		// The card ids inside the payloads below stay literal ON PURPOSE, and this is the one file
+		// where that is right: they are not fixtures naming a card, they are the bytes the HSReplay
+		// feed sends, and the parser under test is what turns them into cards. The LOOKUPS are named,
+		// because that is where a reader asks "which card is this assertion about".
 
 		private async Task<HsReplayArenaDataSource> LoadAsync(string json)
 		{
@@ -50,9 +55,9 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(SymmetricPayload);
 
-			var low = source.GetNormalizedScore(Dbf("CS2_120"))!.Value.Score;   // 40
-			var mid = source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score;   // 50 (median)
-			var high = source.GetNormalizedScore(Dbf("CS2_200"))!.Value.Score;  // 60
+			var low = source.GetNormalizedScore(Dbf(HSCard.RiverCrocolisk))!.Value.Score;   // 40
+			var mid = source.GetNormalizedScore(Dbf(HSCard.ChillwindYeti))!.Value.Score;   // 50 (median)
+			var high = source.GetNormalizedScore(Dbf(HSCard.BoulderfistOgre))!.Value.Score;  // 60
 
 			Assert.True(source.IsLoaded);
 			Assert.Equal(50.0, mid, 0);                 // median card -> 50, not min-max's 67
@@ -75,8 +80,8 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			var highSample = source.GetNormalizedScore(Dbf("CS2_189"))!.Value.Score; // 70 @ 4000
-			var lowSample = source.GetNormalizedScore(Dbf("CS2_168"))!.Value.Score;  // 70 @ 15
+			var highSample = source.GetNormalizedScore(Dbf(HSCard.ElvenArcher))!.Value.Score; // 70 @ 4000
+			var lowSample = source.GetNormalizedScore(Dbf(HSCard.MurlocRaider))!.Value.Score;  // 70 @ 15
 
 			Assert.True(lowSample < highSample);
 		}
@@ -93,7 +98,7 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.True(source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score > source.GetNormalizedScore(Dbf("CS2_200"))!.Value.Score);
+			Assert.True(source.GetNormalizedScore(Dbf(HSCard.ChillwindYeti))!.Value.Score > source.GetNormalizedScore(Dbf(HSCard.BoulderfistOgre))!.Value.Score);
 		}
 
 		[Fact]
@@ -105,7 +110,7 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.Equal(55.0, source.GetRaw(Dbf("CS2_182"))!.DrawnWinrate);
+			Assert.Equal(55.0, source.GetRaw(Dbf(HSCard.ChillwindYeti))!.DrawnWinrate);
 		}
 
 		[Fact]
@@ -118,8 +123,8 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.NotNull(source.GetNormalizedScore(Dbf("CS2_182"))); // 15 >= floor
-			Assert.Null(source.GetNormalizedScore(Dbf("CS2_200")));    // 5  < floor
+			Assert.NotNull(source.GetNormalizedScore(Dbf(HSCard.ChillwindYeti))); // 15 >= floor
+			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.BoulderfistOgre)));    // 5  < floor
 		}
 
 		[Fact]
@@ -135,7 +140,7 @@ namespace HdtArenaHelper.Tests
 			// Games-weighted, NOT "keep the bigger entry" (which threw away 5000 real games) and NOT
 			// the mean of the two rates (which would weight 5000 games like 9000):
 			// (55*5000 + 52*9000) / 14000 = 53.071...
-			var raw = source.GetRaw(Dbf("CS2_106"))!;
+			var raw = source.GetRaw(Dbf(HSCard.FieryWarAxe))!;
 			Assert.Equal((55.0 * 5000 + 52.0 * 9000) / 14000, raw.DrawnWinrate!.Value, 6);
 			Assert.Equal(14000, raw.Games);
 		}
@@ -154,14 +159,14 @@ namespace HdtArenaHelper.Tests
 				] } }";
 			var source = await LoadAsync(payload);
 
-			Assert.NotNull(source.GetNormalizedScore(Dbf("YOP_001")));
-			Assert.NotNull(source.GetNormalizedScore(Dbf("CORE_YOP_001")));
+			Assert.NotNull(source.GetNormalizedScore(Dbf(HSCard.IllidariStudies)));
+			Assert.NotNull(source.GetNormalizedScore(Dbf(HSCard.IllidariStudies_CORE)));
 			Assert.Equal(
-				source.GetNormalizedScore(Dbf("YOP_001"))!.Value.Score,
-				source.GetNormalizedScore(Dbf("CORE_YOP_001"))!.Value.Score, 6);
+				source.GetNormalizedScore(Dbf(HSCard.IllidariStudies))!.Value.Score,
+				source.GetNormalizedScore(Dbf(HSCard.IllidariStudies_CORE))!.Value.Score, 6);
 
 			// One pooled sample of 4000 games, at the games-weighted rate.
-			var canonical = source.GetRaw(Dbf("YOP_001")) ?? source.GetRaw(Dbf("CORE_YOP_001"))!;
+			var canonical = source.GetRaw(Dbf(HSCard.IllidariStudies)) ?? source.GetRaw(Dbf(HSCard.IllidariStudies_CORE))!;
 			Assert.Equal(4000, canonical.Games);
 			Assert.Equal((60.0 * 1000 + 50.0 * 3000) / 4000, canonical.DrawnWinrate!.Value, 6);
 		}
@@ -203,8 +208,8 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(ClassPayload);
 
-			var garrosh = source.GetNormalizedScore(Dbf("HERO_01"))!.Value.Score; // Warrior
-			var jaina = source.GetNormalizedScore(Dbf("HERO_08"))!.Value.Score;   // Mage
+			var garrosh = source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream))!.Value.Score; // Warrior
+			var jaina = source.GetNormalizedScore(Dbf(HSCard.JainaProudmoore))!.Value.Score;   // Mage
 
 			Assert.True(garrosh > jaina);
 		}
@@ -214,7 +219,7 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(ClassPayload);
 
-			Assert.Null(source.GetNormalizedScore(Dbf("HERO_04"))); // Paladin: no bucket
+			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.UtherLightbringer))); // Paladin: no bucket
 		}
 
 		[Fact]
@@ -223,8 +228,8 @@ namespace HdtArenaHelper.Tests
 			var source = new HsReplayArenaDataSource(_cacheDir);
 
 			Assert.False(source.IsLoaded);
-			Assert.Null(source.GetNormalizedScore(Dbf("CS2_106")));
-			Assert.Null(source.GetNormalizedScore(Dbf("HERO_01")));
+			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.FieryWarAxe)));
+			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream)));
 		}
 
 		// A card that is mediocre overall but excels in mage (and vice versa), so the
@@ -249,10 +254,10 @@ namespace HdtArenaHelper.Tests
 			var source = await LoadAsync(PerClassPayload);
 
 			// Class-agnostic ordering (ALL): CS2_120 (55) beats CS2_182 (50)...
-			Assert.True(source.GetNormalizedScore(Dbf("CS2_120"))!.Value.Score > source.GetNormalizedScore(Dbf("CS2_182"))!.Value.Score);
+			Assert.True(source.GetNormalizedScore(Dbf(HSCard.RiverCrocolisk))!.Value.Score > source.GetNormalizedScore(Dbf(HSCard.ChillwindYeti))!.Value.Score);
 			// ...but drafting mage flips it: in the MAGE bucket CS2_182 (58) beats CS2_120 (40).
-			Assert.True(source.GetNormalizedScore(Dbf("CS2_182"), CardClass.MAGE)!.Value.Score
-				> source.GetNormalizedScore(Dbf("CS2_120"), CardClass.MAGE)!.Value.Score);
+			Assert.True(source.GetNormalizedScore(Dbf(HSCard.ChillwindYeti), CardClass.MAGE)!.Value.Score
+				> source.GetNormalizedScore(Dbf(HSCard.RiverCrocolisk), CardClass.MAGE)!.Value.Score);
 		}
 
 		[Fact]
@@ -262,8 +267,8 @@ namespace HdtArenaHelper.Tests
 
 			// CS2_189 has no MAGE entry: the mage-context score IS the ALL score.
 			Assert.Equal(
-				source.GetNormalizedScore(Dbf("CS2_189")),
-				source.GetNormalizedScore(Dbf("CS2_189"), CardClass.MAGE));
+				source.GetNormalizedScore(Dbf(HSCard.ElvenArcher)),
+				source.GetNormalizedScore(Dbf(HSCard.ElvenArcher), CardClass.MAGE));
 		}
 
 		[Fact]
@@ -272,8 +277,8 @@ namespace HdtArenaHelper.Tests
 			var source = await LoadAsync(PerClassPayload);
 
 			Assert.Equal(
-				source.GetNormalizedScore(Dbf("CS2_120")),
-				source.GetNormalizedScore(Dbf("CS2_120"), CardClass.PRIEST));
+				source.GetNormalizedScore(Dbf(HSCard.RiverCrocolisk)),
+				source.GetNormalizedScore(Dbf(HSCard.RiverCrocolisk), CardClass.PRIEST));
 		}
 	}
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using HearthDb;
 using HearthDb.Enums;
 
 namespace HdtArenaHelper
@@ -50,8 +51,20 @@ namespace HdtArenaHelper
 		/// lays out one column per card, so an out-of-order or short list would put every verdict
 		/// on the wrong card. Returns an empty list when it has nothing it can safely say.
 		/// </summary>
+		/// <param name="handDbfIds">The opening hand, in the order the client reports it.</param>
+		/// <param name="deckDbfIds">The 30 drafted cards this hand is judged against.</param>
+		/// <param name="deckClass">The drafted class, for class-aware scoring.</param>
+		/// <param name="onCoin">True when going second: the Coin shifts every card's effective turn.</param>
+		/// <param name="opponentHeroPower">
+		/// The opponent's hero power CARD, when the client exposes it, or null. Passed per call rather
+		/// than set once because it belongs to this one opponent — a cached value would answer the
+		/// previous match's question. Null must leave every verdict exactly as it was without it: an
+		/// unknown hero power may not relax a rule, since advising a player to keep a fragile body on
+		/// missing data is the one error here that costs them the board.
+		/// </param>
 		IReadOnlyList<MulliganCardVerdict> Evaluate(IReadOnlyList<int> handDbfIds,
-			IReadOnlyList<int> deckDbfIds, CardClass deckClass, bool onCoin);
+			IReadOnlyList<int> deckDbfIds, CardClass deckClass, bool onCoin,
+			Card? opponentHeroPower = null);
 
 		/// <summary>
 		/// The plugin's own 0-100 arena score for a card, or null when unknown. Supplied rather than

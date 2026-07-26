@@ -24,7 +24,9 @@ namespace HdtArenaHelper
 	/// average a payoff over the tribal decks that drafted it — so it's ours to catch.
 	/// Because that lever is the only one allowed past the clamp it fails CLOSED: merely
 	/// MENTIONING a tribe is not depending on one, so a card that summons/discovers its own
-	/// members, or that targets the opponent's, is excluded (see SelfSufficientRe).
+	/// members, or that targets the opponent's, is excluded — by the per-tribe
+	/// <see cref="DependencyPatterns"/> whitelist and <see cref="GenerationPatterns"/> veto, which
+	/// replaced an earlier SelfSufficientRe that both this comment and AGENTS.md kept citing.
 	///
 	/// Components:
 	///   - Curve gap: reward filling a cost slot with room left (vs its full-deck target
@@ -52,13 +54,16 @@ namespace HdtArenaHelper
 		// fifth five-drop — the opposite of what a tempo deck wants; and the old 7+ target of 0.11
 		// alongside 0.10 at six meant ~6.3 cards costing 6+, which loses the early game. Mass moved
 		// from 7+ into 5 and 4.
-		private static readonly double[] CurveTarget = { 0.08, 0.22, 0.20, 0.18, 0.15, 0.10, 0.07 };
+		// Internal, not private: DeckMechanics names the thinnest slot against THESE targets rather
+		// than inventing a second reference for the same question. Two sets of curve targets would
+		// eventually disagree, and then the score and the description would contradict each other.
+		internal static readonly double[] CurveTarget = { 0.08, 0.22, 0.20, 0.18, 0.15, 0.10, 0.07 };
 		private const double CurveScale = 8.0;   // points per unit of (target - actual) fraction
 		private const double CurveCap = 2.0;
 		private const int DeckSize = 30;
 		/// <summary>Minions in a typical arena deck; the curve targets are shares of THIS, not of 30,
 		/// because the rule counts only minions on both sides.</summary>
-		private const double MinionsPerDeck = 19.0;
+		internal const double MinionsPerDeck = 19.0;
 
 		private const double TribePayoffPerMember = 0.4;  // payoff offered, members drafted
 		private const int TribePayoffMemberCap = 5;
@@ -152,6 +157,18 @@ namespace HdtArenaHelper
 			// drawing is dependent BY DEFINITION — you can only draw what you drafted. Contrast
 			// "Discover"/"Summon a random", which create from the whole card pool and are not.
 			@"draw [^.]{0,30}{0}",
+			// "The NEXT Secret you play costs (0)" — a cost reducer or buff aimed at the next member
+			// you play is as dependent as one that reads your board, and this grammar is why the axis
+			// missed Anonymous Informant, Kabal Lackey, Kirin Tor Mage and Game Master: the patterns
+			// above were written for tribe wordings ("your Dragons", "a friendly Beast") and Secret
+			// cards speak differently. Measured over all 12 tribes plus both categories, these three
+			// add 8 distinct cards once the generation veto and the own-membership guard have had their
+			// say — the whole Draenei cluster is excluded because those cards ARE Draenei, and
+			// Archimonde is vetoed (it depends on other cards GENERATING demons, which is a dependency
+			// this engine cannot see, so no penalty is the honest answer).
+			@"{0}s? you play",
+			@"{0}s? you played",
+			@"next {0}\b",
 		};
 
 		// Even a dependency whitelist needs one narrow veto, because a possessive can appear inside
@@ -167,22 +184,23 @@ namespace HdtArenaHelper
 		/// <summary>
 		/// One alternation of the given templates with <c>{0}</c> bound to a tribe word, compiled
 		/// once at startup. Both the dependency and the generation sets are built this way.
+		///
+		/// Every literal space in a template goes through <see cref="CardText.WithFlexibleSpaces"/>
+		/// here, and that conversion is the reason this happens centrally rather than in the 13 pattern
+		/// strings: card text carries the client's TOOLTIP LINE BREAKS as newlines, so a template
+		/// written with a plain space silently skipped every card that wrapped mid-phrase. Measured
+		/// against the live pool, that cost the dependency set 69 (card, tribe) pairs and the
+		/// generation veto 14 — it hid Corrosive Breath, Twilight Acolyte, Goblin Blastmage and
+		/// Gentle Megasaur from the dead-card lever, and wrongly exposed Lady Prestor and Alara'shi to
+		/// it by missing their generation clause — while the whole test suite stayed green. Doing it
+		/// here means a template added later cannot reintroduce the bug by being written the obvious
+		/// way.
 		/// </summary>
 		private static Regex BuildTribeRegex(string[] templates, string word)
 			=> new Regex(string.Join("|",
-					Array.ConvertAll(templates, t => "(?:" + t.Replace("{0}", word) + ")")),
+					Array.ConvertAll(templates,
+						t => "(?:" + CardText.WithFlexibleSpaces(t.Replace("{0}", word)) + ")")),
 				RegexOptions.Compiled);
-
-		/// <summary>
-		/// Card text with the class name "demon hunter" stripped. Without this, every Demon Hunter
-		/// card that names its own class matched <c>\bdemons?\b</c> and read as a Demon tribal
-		/// payoff — inflating the tribal bonus and, worse, exposing those cards to the dead-card
-		/// penalty for not having drafted Demons.
-		/// </summary>
-		private static string StripClassNames(string text) => DemonHunterRe.Replace(text, " ");
-
-		private static readonly Regex DemonHunterRe =
-			new Regex(@"\bdemon\s+hunter\b", RegexOptions.Compiled);
 
 		// One entry per spell school: the payoff pattern its cards use ("cast a Fire spell...")
 		// and the SpellSchool tag that makes a spell a member. Patterns are precompiled: with 12
@@ -239,13 +257,13 @@ namespace HdtArenaHelper
 					drafted.Add(card);
 			}
 
-			// Clean each card's text ONCE. CleanText is a regex replace plus an allocation, and
+			// Clean each card's text ONCE. Normalized is a regex replace plus an allocation, and
 			// the tribe/school rules below would otherwise re-run it per drafted card per tribe
 			// (12 + 7 times each) — which the deck-review panel multiplies by the whole deck.
-			var offeredText = StripClassNames(HeuristicArenaDataSource.CleanText(offered));
+			var offeredText = CardText.StripClassNames(CardText.Normalized(offered));
 			var draftedText = new string[drafted.Count];
 			for(var i = 0; i < drafted.Count; i++)
-				draftedText[i] = StripClassNames(HeuristicArenaDataSource.CleanText(drafted[i]));
+				draftedText[i] = CardText.StripClassNames(CardText.Normalized(drafted[i]));
 
 			// Fuzzy synergy: weak, unvalidated rules, so their total is clamped to ±MaxBonus
 			// and they only break ties between comparable cards.
@@ -257,6 +275,8 @@ namespace HdtArenaHelper
 				WeaponBonus(offered, drafted),
 				LocationBonus(offered, drafted),
 				SpellDamageBonus(offered, offeredText, drafted, draftedText),
+				SummonFromDeckBonus(offered, offeredText, drafted),
+				CategoryBonus(offered, offeredText, drafted, draftedText),
 			};
 
 			double fuzzy = 0;
@@ -281,6 +301,125 @@ namespace HdtArenaHelper
 				reason = deadLabel;
 
 			return new SynergyResult(fuzzy + deadPoints, reason);
+		}
+
+		// ---- summon from deck ----------------------------------------------------
+
+		/// <summary>
+		/// Cards that pull minions OUT OF THE DECK, whose value is set by the deck rather than by
+		/// their own text — the one place in this engine where the drafted list does not merely
+		/// nudge a card but decides most of what it is worth.
+		///
+		/// The rule they turn on is Hearthstone's, not a heuristic: a SUMMONED minion never
+		/// triggers its Battlecry, while Deathrattle, Taunt, Divine Shield and the statline all
+		/// survive intact. So the same effect that fetches two 1-drops is two real cards in a deck
+		/// of Deathrattles and two blank bodies in a deck of Battlecries, and the win-rate feed
+		/// cannot see the difference: it averages the card over every deck that drafted it.
+		///
+		/// The rule fires ONLY on cards whose text names a cheap restriction, because that is the
+		/// population it measures. Checked against the live pool: of the cards that summon from the
+		/// deck, most do NOT point at the cheap end — Cowardly Grunt and Maxima Blastenheimer take
+		/// any minion, Oaken Summons "(4) or less", Pet Collector "(5) or less", Meat Wagon and Lead
+		/// Dancer go by ATTACK, Finja and Tavish by tribe. Scoring those off the 1-2 bucket can
+		/// invert the sign: a deck of cheap Deathrattles and expensive Battlecries would read as
+		/// friendly to a card that will summon one of the Battlecries.
+		///
+		/// So the trigger is a whitelist of the cheap wordings, the same shape as the tribal rules'
+		/// DependencyPatterns, rather than a number extracted from prose. A Battlecry is still
+		/// counted whole: how much of a card's worth sits in its text is a judgement this project
+		/// refuses to hand-tune, so every Battlecry minion counts once.
+		/// </summary>
+		/// The whitespace is <c>\s+</c>, not a space, and that is load-bearing: card text carries the
+		/// client's own TOOLTIP LINE WRAPS as newlines, and CleanText does not collapse them. Measured
+		/// against the live pool, a literal space made the rule fire on 4 cards instead of 6 — it
+		/// missed Skydiving Instructor ("Summon a\n1-Cost minion from\nyour deck") and Reinforcement
+		/// Aura, both squarely the population it exists for, purely because Blizzard wrapped the line
+		/// mid-phrase. Whether a rule fires must never depend on where a tooltip broke.
+		private static readonly Regex SummonsFromDeckRe = new Regex(
+			@"\bsummon\b[^.]*\bfrom\s+your\s+deck\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// The cheap restriction the card must state for this rule to apply at all: "1-Cost", or
+		/// "costs (2) or less" and below. Enumerated rather than parsed — an open-ended number grab
+		/// over card prose is the fragile pattern AGENTS.md warns about.
+		/// </summary>
+		private static readonly Regex CheapSummonRe = new Regex(
+			@"\b[12]-cost\b|\bcosts?\s*\([012]\)\s*or\s*less\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// A card that fetches ITSELF is not reading the deck's quality — Patches the Pirate pulls
+		/// one known card, its own, so the surrounding minions say nothing about what it is worth.
+		/// Found by running the pattern over the live pool, which is the check AGENTS.md asks for —
+		/// and the same pass showed this wording is not the only one: Persistent Peddler summons a
+		/// "Persistent Peddler", naming itself instead of saying "this", so the card's OWN NAME is
+		/// checked too.
+		/// </summary>
+		private static readonly Regex SummonsItselfRe = new Regex(
+			@"\bsummon\s+this\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		private const int SummonFromDeckMaxCost = 2;
+		private const double SummonFromDeckPerCard = 0.25;
+		private const double SummonFromDeckCap = 1.2;
+		// Below this many cheap minions the ratio is noise, not a deck profile.
+		private const int SummonFromDeckMinSample = 4;
+
+		private static (double Points, string? Label) SummonFromDeckBonus(
+			Card offered, string offeredText, IReadOnlyList<Card> drafted)
+		{
+			if(offeredText.Length == 0 || !SummonsFromDeckRe.IsMatch(offeredText)
+				|| !CheapSummonRe.IsMatch(offeredText) || FetchesItself(offered, offeredText))
+				return (0, null);
+
+			var blanked = 0;
+			var intact = 0;
+			foreach(var card in drafted)
+			{
+				// Cost 0 counts: "(2) or less" reaches it, and a 0-cost Battlecry minion is exactly
+				// the blank body this rule is about.
+				if(card.Type != CardType.MINION || card.Cost > SummonFromDeckMaxCost)
+					continue;
+				// A Battlecry that also carries a Deathrattle still lands something when summoned,
+				// so it is not a blank — the loss has to be total to count against the card.
+				if(card.Entity.GetTag(GameTag.BATTLECRY) != 0
+					&& card.Entity.GetTag(GameTag.DEATHRATTLE) == 0)
+					blanked++;
+				else
+					intact++;
+			}
+
+			if(blanked + intact < SummonFromDeckMinSample)
+				return (0, null);
+
+			var points = Math.Max(-SummonFromDeckCap,
+				Math.Min(SummonFromDeckCap, SummonFromDeckPerCard * (intact - blanked)));
+			if(Math.Abs(points) < MinReasonPoints)
+				return (points, null);
+			return (points, points > 0
+				? "your cheap minions summon intact"
+				: "summons your Battlecry minions blank");
+		}
+
+		/// <summary>
+		/// Does the card pull a KNOWN card — itself — rather than reading the deck? Two wordings in
+		/// the pool: "summon this minion from your deck" (Patches the Pirate) and naming itself
+		/// (Persistent Peddler). Either way the drafted list says nothing about its value.
+		/// </summary>
+		private static bool FetchesItself(Card offered, string offeredText)
+		{
+			if(SummonsItselfRe.IsMatch(offeredText))
+				return true;
+			var name = offered.Name;
+			if(string.IsNullOrEmpty(name))
+				return false;
+			// Both sides are flattened before comparing, for the same reason SummonsFromDeckRe matches
+			// \s+: the text's newlines are tooltip line wraps, so a two-word name can be split across
+			// one ("Persistent\nPeddler") and a raw IndexOf would miss the very card that motivated
+			// this check. offeredText is lower-cased by CleanText, so the name must be too.
+			var flatText = CardText.Flatten(offeredText);
+			var flatName = CardText.Flatten(name.ToLowerInvariant());
+			return flatText.IndexOf(flatName, System.StringComparison.Ordinal) >= 0;
 		}
 
 		// ---- curve ---------------------------------------------------------------
@@ -323,10 +462,12 @@ namespace HdtArenaHelper
 			return (bonus, label);
 		}
 
-		private static int CostBucket(int cost)
+		// Internal, not private: DeckMechanics reports the same curve to the player and must bucket
+		// it identically. Two copies of "which slot is this" would drift the moment one changed.
+		internal static int CostBucket(int cost)
 			=> cost <= 1 ? 0 : cost >= 7 ? 6 : cost - 1;
 
-		private static string BucketLabel(int bucket)
+		internal static string BucketLabel(int bucket)
 			=> bucket == 6 ? "7+ drop" : $"{bucket + 1}-drop";
 
 		// ---- tribes ----------------------------------------------------------------
@@ -353,6 +494,49 @@ namespace HdtArenaHelper
 			=> (word, new Regex($@"\b{word}s?\b", RegexOptions.Compiled),
 				BuildTribeRegex(DependencyPatterns, word),
 				BuildTribeRegex(GenerationPatterns, word), races);
+
+		// ---- categories (tag-identified, not race-identified) ----------------------
+
+		/// <summary>
+		/// Dependency axes that are a card CATEGORY rather than a tribe: Secrets and Auras. Identified
+		/// by a GameTag, so membership is as objective as a Race — no text heuristic decides who is a
+		/// member. They exist because "if you control a Secret" is exactly as conditional as "if you
+		/// control a Dragon", and the engine used to model the second and ignore the first: Chatty
+		/// Bartender ("if you control a Secret, deal 2 damage to all enemies") took no penalty at all
+		/// while Mirror Dimension's dragon clause did, in the same offered triple.
+		///
+		/// The population that matters is NEUTRAL: a class card is only ever offered to its own class,
+		/// but 8 neutral cards genuinely depend on controlling a Secret (Sunreaver Spy, Crossroads
+		/// Gossiper, Horde Operative, Illuminator, Masked Contender, Scuttlebutt Ghoul, Avian Watcher)
+		/// and those are offered to everyone. Anti-secret tech (Eater of Secrets, Kezan Mystic) reads as
+		/// NOT dependent through the existing whitelist, the same way anti-tribe tech does.
+		/// </summary>
+		internal static readonly GameTag[] CategoryTags = { GameTag.SECRET, GameTag.PALADIN_AURA };
+
+		private static readonly (string Word, Regex Re, Regex DependsRe, Regex GeneratesRe, GameTag Tag)[]
+			Categories =
+			{
+				CategoryEntry("secret", GameTag.SECRET),
+				CategoryEntry("aura", GameTag.PALADIN_AURA),
+			};
+
+		private static (string, Regex, Regex, Regex, GameTag) CategoryEntry(string word, GameTag tag)
+			=> (word, new Regex($@"\b{word}s?\b", RegexOptions.Compiled),
+				BuildTribeRegex(DependencyPatterns, word),
+				BuildTribeRegex(GenerationPatterns, word), tag);
+
+		private static bool IsOfCategory(Card card, GameTag tag)
+		{
+			try
+			{
+				return card.Entity.GetTag(tag) != 0;
+			}
+			catch
+			{
+				// A card whose entity cannot answer is simply not a member; never fail a whole score.
+				return false;
+			}
+		}
 
 		private static (double Points, string? Label) TribalBonus(Card offered, string offeredText,
 			IReadOnlyList<Card> drafted, string[] draftedText)
@@ -405,6 +589,59 @@ namespace HdtArenaHelper
 			return (bonus, label);
 		}
 
+		/// <summary>
+		/// The payoff/member bonus on a category, mirroring <see cref="TribalBonus"/> but with tag
+		/// membership. Capped like the spell-school rule rather than the tribal one: a Secret payoff
+		/// usually wants ONE Secret in play, not a critical mass, so more of them is worth less than
+		/// more Murlocs is.
+		/// </summary>
+		private static (double Points, string? Label) CategoryBonus(Card offered, string offeredText,
+			IReadOnlyList<Card> drafted, string[] draftedText)
+		{
+			double bonus = 0;
+			string? best = null;
+			double bestPoints = 0;
+
+			foreach(var (word, re, dependsRe, generatesRe, tag) in Categories)
+			{
+				double points = 0;
+
+				if(IsDeckDependent(offeredText, dependsRe, generatesRe))
+				{
+					var members = 0;
+					foreach(var card in drafted)
+					{
+						if(IsOfCategory(card, tag))
+							members++;
+					}
+					if(members > 0)
+						points += SpellSchoolPerMember * Math.Min(members, SpellSchoolMemberCap);
+				}
+
+				if(IsOfCategory(offered, tag))
+				{
+					var payoffs = 0;
+					for(var i = 0; i < draftedText.Length; i++)
+					{
+						if(re.IsMatch(draftedText[i]))
+							payoffs++;
+					}
+					if(payoffs > 0)
+						points += SpellSchoolPerPayoff * Math.Min(payoffs, SpellSchoolPayoffCap);
+				}
+
+				bonus += points;
+				if(points > bestPoints)
+				{
+					bestPoints = points;
+					best = word;
+				}
+			}
+
+			bonus = Math.Min(SpellSchoolCap, bonus);
+			return (bonus, best == null ? null : Capitalize(best) + " synergy");
+		}
+
 		// ---- dead-card conditionality ----------------------------------------------
 
 		// A tribal payoff/enabler (references a tribe but is not a member of it) is a dead card
@@ -446,6 +683,7 @@ namespace HdtArenaHelper
 			// dragons, so one live tribe clears the whole card.
 			string? missing = null;
 			Race[]? missingRaces = null;
+			Regex? missingWordRe = null;
 			foreach(var (word, re, dependsRe, generatesRe, races) in Tribes)
 			{
 				if(!IsDeckDependent(offeredText, dependsRe, generatesRe) || IsOfTribe(offered, races))
@@ -467,17 +705,52 @@ namespace HdtArenaHelper
 				{
 					missing = word;
 					missingRaces = races;
+					missingWordRe = re;
 				}
 			}
+			// The same scan over CATEGORIES (Secret, Aura): a tag-identified axis is a dependency just
+			// like a tribe, and it used to be invisible here. Only reached when no tribe already
+			// answered — one live tribe clears the card, exactly as before.
+			GameTag? missingTag = null;
 			if(missing == null)
-				return (0, null); // references no tribe it isn't part of
+			{
+				foreach(var (word, re, dependsRe, generatesRe, tag) in Categories)
+				{
+					if(!IsDeckDependent(offeredText, dependsRe, generatesRe) || IsOfCategory(offered, tag))
+						continue;
+
+					var members = 0;
+					foreach(var card in drafted)
+					{
+						if(IsOfCategory(card, tag))
+							members++;
+					}
+					if(members > 0)
+						return (0, null); // the category is genuinely live
+					if(missingTag == null)
+					{
+						missing = word;
+						missingTag = tag;
+						missingWordRe = re;
+					}
+				}
+			}
+
+			if(missing == null)
+				return (0, null); // references no tribe or category it isn't part of
 
 			// Grows with draft progress: at pick 3 zero members is fine (you can still
 			// pivot into the tribe); by pick 25 the payoff is a dead card. Cards with a
 			// standalone function only lose the conditional part, not the whole card.
 			var progress = Math.Min(1.0, drafted.Count / (double)DeckSize);
-			var cap = HasStandaloneFunction(offered) ? DeadPayoffMax * DeadBodyFactor : DeadPayoffMax;
-			var damping = AvailabilityDamping(draftClass, missingRaces, drafted.Count);
+			// A body OR a base line that still plays: both mean the card loses its rider, not its
+			// function, so only DeadBodyFactor of the penalty applies.
+			var standalone = HasStandaloneFunction(offered)
+				|| (missingWordRe != null && HasUnconditionalClause(offeredText, missingWordRe));
+			var cap = standalone ? DeadPayoffMax * DeadBodyFactor : DeadPayoffMax;
+			var damping = missingTag != null
+				? CategoryAvailabilityDamping(draftClass, missingTag.Value, drafted.Count)
+				: AvailabilityDamping(draftClass, missingRaces, drafted.Count);
 			return (-cap * progress * damping, $"no {Capitalize(missing)}s for this card");
 		}
 
@@ -490,6 +763,29 @@ namespace HdtArenaHelper
 		/// Returns 1.0 (no change) whenever the answer is unknown, and can never exceed 1.0. A
 		/// dual-race tribe uses its most available race, since either one turns the payoff on.
 		/// </summary>
+		/// <summary>
+		/// The category counterpart, on the same measured share and the same one-way rule. It matters
+		/// more here than for tribes: measured on the live payload, Secrets are ~4.2% of MAGE, HUNTER
+		/// and ROGUE slots and 0% of the other eight classes — Paladin included, which HAS Secrets in
+		/// principle but none in this pool. So the reduction is real for a Mage holding a Secret payoff
+		/// early (0.84 expected in 20 picks, damping 0.58) and absent for a Warrior, and neither number
+		/// is written down anywhere: both are re-measured every patch.
+		/// </summary>
+		private double CategoryAvailabilityDamping(CardClass draftClass, GameTag tag, int draftedCount)
+		{
+			var availability = _availability;
+			if(availability == null || draftClass == CardClass.INVALID)
+				return 1.0;
+
+			var share = availability.CategoryShare(draftClass, tag);
+			if(share == null)
+				return 1.0;
+
+			var picksLeft = Math.Max(0, DeckSize - draftedCount);
+			var expected = share.Value / 100.0 * picksLeft;
+			return Math.Max(DeadAvailabilityFloor, Math.Min(1.0, 1.0 - expected / DeadEnoughMembers));
+		}
+
 		private double AvailabilityDamping(CardClass draftClass, Race[]? races, int draftedCount)
 		{
 			var availability = _availability;
@@ -529,6 +825,56 @@ namespace HdtArenaHelper
 			=> card.Type == CardType.HERO
 				|| (card.Type == CardType.MINION
 					&& card.Attack + card.Health - (2 * card.Cost + 1) > DeadBodyStatlineFloor);
+
+		/// <summary>
+		/// Does the card still DO something with the missing tribe or category absent? The body test
+		/// above only speaks for minions, so a spell or a location whose base line is a complete effect
+		/// took the full penalty — and that is wrong for a whole family of cards where the tribe clause
+		/// is a rider rather than the function. Seen live: Mirror Dimension ("Summon a 0/4 minion with
+		/// Taunt. If you are holding a Dragon, summon another") was penalized as a dead card while it is
+		/// a fine 1-mana Taunt; same for Corrosive Breath, which is a 3-damage removal spell first.
+		///
+		/// Structural rather than a verb list: if any SENTENCE never mentions the missing word, that
+		/// sentence is the base line and it still plays. Deliberately generous — a false "standalone"
+		/// only ever REDUCES the penalty, which is the direction this lever is required to fail in,
+		/// being the only one allowed past the clamp.
+		/// </summary>
+		private static bool HasUnconditionalClause(string text, Regex wordRe)
+		{
+			foreach(var sentence in text.Split('.'))
+			{
+				var clause = sentence.Trim();
+				// Too short to be an effect, or a bare keyword/reminder line ("Taunt", "(Upgrades when
+				// Traded!)"): those are not a base line, and counting them would exempt everything.
+				if(clause.Length < MinClauseLength || clause.StartsWith("(", StringComparison.Ordinal))
+					continue;
+				// A clause that CONTINUES the previous one is not an independent base line: Ancient
+				// Mysteries is "Draw a Secret. It costs (0)." and the second half only modifies the
+				// Secret the first half needed. Without this, lowering the length floor exempted a card
+				// that genuinely cannot function with none of the category drafted.
+				if(ContinuationRe.IsMatch(clause))
+					continue;
+				if(wordRe.IsMatch(clause))
+					continue;
+				return true;
+			}
+			return false;
+		}
+
+		/// <summary>
+		/// A clause opening with a pronoun that points back at the previous one ("It costs (0)", "They
+		/// gain +1/+1"): a continuation, never a standalone effect.
+		/// </summary>
+		private static readonly Regex ContinuationRe = new Regex(
+			@"^(it|they|them|its|their|this)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		// Shorter than this and a clause cannot carry an effect worth calling a base line. Low on
+		// purpose: real base lines ARE short ("Draw 2 cards", "Gain 4 Armor", "Deal 2 damage"), and a
+		// floor of 14 kept the full penalty on Grave Digging — whose base line is literally "Draw 2
+		// cards" at 12 characters. The clauses this is meant to reject are bare keyword labels
+		// ("Taunt", "Divine Shield"), and those only appear on MINIONS, which the body test above
+		// already exempts — so the floor does not have to carry that weight for spells and locations.
+		private const int MinClauseLength = 10;
 
 		private static string Capitalize(string word)
 			=> word.Length == 0 ? word : char.ToUpperInvariant(word[0]) + word.Substring(1);

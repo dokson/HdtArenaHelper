@@ -109,6 +109,15 @@ namespace HdtArenaHelper
 		// Mulligan: the opening hand sits centred and low, so the numbers go ABOVE the cards.
 		// Live-tuned: at 0.30 the stack landed on the cards themselves, hiding the gauge against the
 		// card art and covering the mana gems.
+		/// <summary>
+		/// Horizontal gap between mulligan columns, as a fraction of the design width — and it depends
+		/// on the HAND SIZE, because the client fans a smaller hand wider. Both values are live-measured
+		/// against card positions in a screenshot: with 3 cards the real gap is ~0.28 and a flat 0.20
+		/// left the two outer labels ~0.07-0.10 of the width too far inwards, while with 4 cards 0.20
+		/// is right. A two-entry table is COMPLETE rather than a special case: a Hearthstone opening
+		/// hand is always 3 cards going first or 4 going second.
+		/// </summary>
+		private const double MulliganSpreadFractionThree = 0.28;
 		private const double MulliganSpreadFraction = 0.20;
 		private const double MulliganCentreYFraction = 0.22;
 
@@ -348,7 +357,9 @@ namespace HdtArenaHelper
 			if(entries.Count == 0)
 				return;
 
-			var spread = DesignWidth * MulliganSpreadFraction;
+			var spread = DesignWidth * (entries.Count == 3
+				? MulliganSpreadFractionThree
+				: MulliganSpreadFraction);
 			var centreY = DesignHeight * MulliganCentreYFraction;
 			var centreX = DesignWidth / 2.0;
 			Log($"layout Mulligan cards={entries.Count} centre={centreX:0} spread={spread:0} " +
@@ -395,17 +406,105 @@ namespace HdtArenaHelper
 
 
 		/// <summary>
-		/// Render the redraft edit phase's deck panel: EVERY card in the deck, in the game's own
-		/// order (cost, then name) so a row is findable at a glance, each with an HDT-style score
-		/// badge and the suggested cuts flagged red. Call on the UI thread; <paramref name="ranked"/>
-		/// is the cut shortlist, <paramref name="fullDeck"/> the whole deck.
+		/// The run screen's deck description: what the deck DOES, in counts. Client-relative and
+		/// top-LEFT, which is empty on both run screens (normal Arena's "Ready Up" and the Underground
+		/// hub) — the bottom of that screen is taken by the hero portrait, the game's own curve widget
+		/// and Play, and the centre by the reward banner.
 		///
-		/// An earlier version drew this badge column ON TOP of the game's own "Your Deck" list, so
-		/// the number would sit where the click is. That cannot be aligned and was removed: measured
-		/// live, the redraft deck has 23-28 DISTINCT rows while the game's list shows ~21 without
-		/// scrolling, so it always scrolls — and the scroll offset is not readable from the client,
-		/// which makes every badge position a guess. Our own list is always right.
+		/// Placement is a first guess and MUST be checked live: the coords are logged so a screenshot
+		/// can correct them, which is the only way overlay geometry has ever been fixed in this project.
 		/// </summary>
+		public void SetRunSummary(DeckMechanics mechanics, string classLabel, int wins, int losses)
+		{
+			_canvas.Children.Clear();
+			_cornerLayer.Children.Clear();
+
+			var list = new StackPanel();
+			list.Children.Add(new TextBlock
+			{
+				Text = $"{classLabel}   {wins}-{losses}",
+				FontSize = 15,
+				FontWeight = FontWeights.Bold,
+				Foreground = Brushes.White,
+				Margin = new Thickness(0, 0, 0, 4)
+			});
+
+			// The curve first, because it is the one line that reads as a shape rather than a number, and
+			// over ALL cards: the client draws its own all-cards curve a few centimetres below this panel,
+			// so a minions-only count here reads as a miscount. Live, exactly that happened — a 6-cost
+			// SPELL appeared on the game's curve and not on ours. The SCORE still reasons about bodies
+			// only (see DeckMechanics.MinionCurve); the two answer different questions.
+			var curve = new System.Text.StringBuilder();
+			for(var i = 0; i < mechanics.FullCurve.Count; i++)
+			{
+				if(curve.Length > 0)
+					curve.Append("  ");
+				curve.Append(i == mechanics.FullCurve.Count - 1 ? "7+" : (i + 1).ToString())
+					.Append(':').Append(mechanics.FullCurve[i]);
+			}
+			list.Children.Add(BuildSummaryRow("curve", curve.ToString()));
+			list.Children.Add(BuildSummaryRow("bodies",
+				$"{mechanics.Minions} minions, {mechanics.Weapons + mechanics.Locations} weapons/locations"));
+			list.Children.Add(BuildSummaryRow("removal",
+				$"{mechanics.HardRemoval} hard, {mechanics.DamageCards} damage"));
+			list.Children.Add(BuildSummaryRow("reach", $"{mechanics.Aoe} AoE, {mechanics.Draw} draw"));
+			if(mechanics.Profile.Length > 0)
+			{
+				// The profile and the slot it is thinnest in, together on purpose: the profile is a mean
+				// and a mean hides structure, so "midrange, thin at 3" says more than either half does.
+				var shape = mechanics.ThinnestSlot < 0
+					? $"{mechanics.Profile} ({mechanics.AverageCost:0.0})"
+					: $"{mechanics.Profile} ({mechanics.AverageCost:0.0}), thin at "
+						+ MetadataSynergyEngine.BucketLabel(mechanics.ThinnestSlot);
+				list.Children.Add(BuildSummaryRow("shape", shape));
+			}
+
+			var panel = new Border
+			{
+				Background = new SolidColorBrush(Color.FromArgb(210, 12, 12, 14)),
+				CornerRadius = new CornerRadius(8),
+				Padding = new Thickness(12, 6, 14, 8),
+				Child = list,
+				Effect = new System.Windows.Media.Effects.DropShadowEffect
+				{
+					Color = Colors.Black,
+					BlurRadius = 8,
+					ShadowDepth = 0,
+					Opacity = 0.8
+				},
+				HorizontalAlignment = HorizontalAlignment.Left,
+				VerticalAlignment = VerticalAlignment.Top,
+				Margin = new Thickness(RunSummaryLeft * ActualWidth, RunSummaryTop * ActualHeight, 0, 0)
+			};
+			_cornerLayer.Children.Add(panel);
+			Log($"layout RunSummary left={RunSummaryLeft * ActualWidth:0} top={RunSummaryTop * ActualHeight:0} "
+				+ $"(client {ActualWidth:0}x{ActualHeight:0}) curve=[{curve}]");
+		}
+
+		// Fractions of the client, not absolute pixels, so a resize re-anchors by itself. First guess:
+		// clear of the reward banner on both run screens. Re-check on a live client before trusting.
+		private const double RunSummaryLeft = 0.02;
+		private const double RunSummaryTop = 0.06;
+
+		private static StackPanel BuildSummaryRow(string label, string value)
+		{
+			var row = new StackPanel { Orientation = Orientation.Horizontal };
+			row.Children.Add(new TextBlock
+			{
+				Text = label,
+				FontSize = 13,
+				Width = 62,
+				Foreground = Brushes.Silver
+			});
+			row.Children.Add(new TextBlock
+			{
+				Text = value,
+				FontSize = 13,
+				Foreground = Brushes.White
+			});
+			return row;
+		}
+
 		public void SetDeckReview(IReadOnlyList<OverlayEntry> ranked,
 			IReadOnlyList<OverlayEntry>? fullDeck = null)
 		{
@@ -485,7 +584,10 @@ namespace HdtArenaHelper
 				Child = list,
 				Effect = new System.Windows.Media.Effects.DropShadowEffect
 				{
-					Color = Colors.Black, BlurRadius = 8, ShadowDepth = 0, Opacity = 0.8
+					Color = Colors.Black,
+					BlurRadius = 8,
+					ShadowDepth = 0,
+					Opacity = 0.8
 				},
 				// Against the LEFT edge of the client, opposite the game's own "Your Deck" list:
 				// the row heights already match that list, so sitting on top of it added nothing
@@ -612,7 +714,10 @@ namespace HdtArenaHelper
 				Opacity = dimmed ? 0.8 : 1.0,
 				Effect = new System.Windows.Media.Effects.DropShadowEffect
 				{
-					Color = Colors.Black, BlurRadius = 6, ShadowDepth = 0, Opacity = 0.85
+					Color = Colors.Black,
+					BlurRadius = 6,
+					ShadowDepth = 0,
+					Opacity = 0.85
 				}
 			};
 
@@ -665,7 +770,10 @@ namespace HdtArenaHelper
 				Child = stack,
 				Effect = new System.Windows.Media.Effects.DropShadowEffect
 				{
-					Color = Colors.Black, BlurRadius = 8, ShadowDepth = 0, Opacity = 0.7
+					Color = Colors.Black,
+					BlurRadius = 8,
+					ShadowDepth = 0,
+					Opacity = 0.7
 				}
 			};
 		}

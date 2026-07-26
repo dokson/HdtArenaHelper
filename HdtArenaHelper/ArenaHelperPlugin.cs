@@ -73,8 +73,8 @@ namespace HdtArenaHelper
 		private MenuItem? _updateStatusItem;     // the submenu line reporting update state
 		private string _updateStatusText = "—"; // last status, replayed when the menu builds late
 		private volatile string? _updatePage;    // releases page to open on click, when relevant
-		// Cancels an in-flight check on unload/disable: without it a download that finishes after
-		// the plugin is gone would still run the rename swap on a DLL nobody will reload.
+												 // Cancels an in-flight check on unload/disable: without it a download that finishes after
+												 // the plugin is gone would still run the rename swap on a DLL nobody will reload.
 		private CancellationTokenSource? _updateCts;
 		private DateTime _lastManualCheckUtc = DateTime.MinValue;
 		private static readonly TimeSpan ManualCheckFloor = TimeSpan.FromMinutes(1);
@@ -83,9 +83,9 @@ namespace HdtArenaHelper
 
 		private volatile bool _dataReady;            // sources have finished their load attempt
 		private volatile int _warmGeneration;        // bumped per WarmData; a superseded loop stops
-		// Pairs the generation check with the _dataReady write: without it a superseded
-		// loop could pass the check, get preempted by a Refresh (bump + reset), then
-		// stamp _dataReady with the OLD aggregator's verdict.
+													 // Pairs the generation check with the _dataReady write: without it a superseded
+													 // loop could pass the check, get preempted by a Refresh (bump + reset), then
+													 // stamp _dataReady with the OLD aggregator's verdict.
 		private readonly object _warmLock = new object();
 		// ONE active screen, not four nullable fields: the screens are mutually exclusive, and the old
 		// shape maintained that in two places (every handler AND every render branch nulled the
@@ -107,9 +107,9 @@ namespace HdtArenaHelper
 				var aggregator = BuildAggregator();
 				WireSynergy(aggregator);
 				_aggregator = aggregator;
-
-					_watcher.OnChoicesChanged += OnChoicesChanged;
+				_watcher.OnChoicesChanged += OnChoicesChanged;
 				_watcher.OnDeckReview += OnDeckReviewChanged;
+				_watcher.OnRunSummary += OnRunSummaryChanged;
 				_watcher.OnDraftEnded += OnDraftEnded;
 				_choiceWatcher.OnChoicesChanged += OnCardChoiceChanged;
 				_choiceWatcher.OnChoicesGone += OnCardChoiceGone;
@@ -157,6 +157,7 @@ namespace HdtArenaHelper
 		{
 			_watcher.OnChoicesChanged -= OnChoicesChanged;
 			_watcher.OnDeckReview -= OnDeckReviewChanged;
+			_watcher.OnRunSummary -= OnRunSummaryChanged;
 			_watcher.OnDraftEnded -= OnDraftEnded;
 			_choiceWatcher.OnChoicesChanged -= OnCardChoiceChanged;
 			_choiceWatcher.OnChoicesGone -= OnCardChoiceGone;
@@ -614,11 +615,36 @@ namespace HdtArenaHelper
 				$"{e.DraftedDbfIds.Count} drafted, underground={e.IsUnderground}");
 		}
 
+		private void OnRunSummaryChanged(object sender, RunSummaryEventArgs e) => _activeScreen = e;
+
+		/// <summary>
+		/// Describes the finished run deck on the screen between matches. Descriptive only — counts the
+		/// player can check against their own deck, and no judgement drawn from them, which is why this
+		/// needs no validation to be honest.
+		/// </summary>
+		private void RenderRunSummary(RunSummaryEventArgs e)
+		{
+			var mechanics = DeckMechanics.Describe(e.DeckDbfIds);
+			Log.Info($"[ArenaHelper] run summary: {mechanics.ToLine()}");
+			_overlay?.SetRunSummary(mechanics, e.DraftClass.ToString(), e.Wins, e.Losses);
+		}
+
 		private void OnDeckReviewChanged(object sender, DeckReviewEventArgs e)
 		{
 			_activeScreen = e;
 			Log.Info($"[ArenaHelper] deck review: {e.Deck.Count} cards, " +
 				$"class={e.DraftClass}, underground={e.IsUnderground}");
+
+			// What the deck DOES, in counts. Logged before it is shown anywhere: the numbers are
+			// verifiable against the deck on screen, and the overlay row for them needs a live client
+			// to place (see AGENTS.md — geometry is never verified offline).
+			var expanded = new List<int>();
+			foreach(var card in e.Deck)
+			{
+				for(var i = 0; i < System.Math.Max(1, card.Count); i++)
+					expanded.Add(card.DbfId);
+			}
+			Log.Info($"[ArenaHelper] deck mechanics: {DeckMechanics.Describe(expanded).ToLine()}");
 		}
 
 		private void OnDraftEnded(object sender, EventArgs e)
@@ -652,7 +678,61 @@ namespace HdtArenaHelper
 		private void OnCardChoiceGone(object sender, EventArgs e)
 			=> ClearScreen<CardChoiceEventArgs>();
 
-		private void OnMulliganChanged(object sender, MulliganEventArgs e) => _activeScreen = e;
+		private void OnMulliganChanged(object sender, MulliganEventArgs e)
+		{
+			_activeScreen = e;
+			LogOpponentHeroPower();
+		}
+
+		/// <summary>
+		/// Reads the opponent's CURRENT hero power and logs how cheaply it can answer a small body.
+		///
+		/// LOG ONLY, deliberately: whether HDT has the entity populated by the time the mulligan is on
+		/// screen cannot be established offline, and no verdict may rest on a read that might be empty.
+		/// Once the log confirms it arrives in time, the mulligan's one-health rule can consume it.
+		///
+		/// Keyed on the hero power CARD, never on the class. A dual-class arena hero does not identify
+		/// its hero power, and hero cards replace it mid-game — the question is what THIS button does.
+		/// It comes from HDT's own game state because HearthMirror does not carry it: verified across
+		/// all 76 <c>IReflection</c> methods, <c>MatchInfo.Player</c> and <c>MulliganState</c>.
+		/// </summary>
+		private static HearthDb.Card? ReadOpponentHeroPower()
+		{
+			try
+			{
+				var entity = Core.Game?.Opponent?.PlayerEntities?
+					.FirstOrDefault(x => x != null && x.IsHeroPower && x.IsInPlay);
+				if(entity == null || string.IsNullOrEmpty(entity.CardId))
+					return null;
+
+				// Resolved through HearthDb rather than HDT's own Card wrapper: the classifier reads the
+				// printed text, and HearthDb is the card data this project already trusts everywhere.
+				HearthDb.Cards.All.TryGetValue(entity.CardId, out var card);
+				return card;
+			}
+			catch(Exception ex)
+			{
+				// Fail soft: an unreadable hero power must leave the advice exactly as it was, never
+				// throw out of a render path.
+				Log.Info($"[ArenaHelper] mulligan: opponent hero power read failed: {ex.Message}");
+				return null;
+			}
+		}
+
+		private static void LogOpponentHeroPower()
+		{
+			var card = ReadOpponentHeroPower();
+			if(card == null)
+			{
+				Log.Info("[ArenaHelper] mulligan: opponent hero power not readable yet");
+				return;
+			}
+
+			var (answer, free) = HeroPowerThreat.Classify(card);
+			Log.Info($"[ArenaHelper] mulligan: opponent hero power '{card.Name}' -> {answer}, "
+				+ $"free damage {free}, kills 1 health={HeroPowerThreat.KillsForFree(card, 1)}, "
+				+ $"2 health={HeroPowerThreat.KillsForFree(card, 2)}");
+		}
 
 		private void OnMulliganGone(object sender, EventArgs e) => ClearScreen<MulliganEventArgs>();
 
@@ -680,6 +760,9 @@ namespace HdtArenaHelper
 					break;
 				case DeckReviewEventArgs review:
 					RenderDeckReview(review);
+					break;
+				case RunSummaryEventArgs run:
+					RenderRunSummary(run);
 					break;
 				case CardChoiceEventArgs cardChoice:
 					RenderCardChoice(cardChoice);
@@ -746,7 +829,10 @@ namespace HdtArenaHelper
 				return blended.HasData && !blended.IsLowConfidence ? blended.Value : (double?)null;
 			});
 
-			var verdicts = _mulliganAdvisor.Evaluate(e.HandDbfIds, e.DeckDbfIds, e.DeckClass, e.OnCoin);
+			// Read fresh per render, never cached: the hero power belongs to THIS opponent, and a stale
+			// one from the previous match would answer the wrong question with full confidence.
+			var verdicts = _mulliganAdvisor.Evaluate(e.HandDbfIds, e.DeckDbfIds, e.DeckClass, e.OnCoin,
+				ReadOpponentHeroPower());
 			// The advisor answers all-or-nothing (verdicts are laid out by index), so a short list
 			// means it declined to speak about this hand at all.
 			if(verdicts.Count != e.HandDbfIds.Count)

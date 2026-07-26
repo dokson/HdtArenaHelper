@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using HdtArenaHelper.Numerics;
 using HearthDb;
 using HearthDb.Enums;
-using HdtArenaHelper.Numerics;
 
 namespace HdtArenaHelper.Training
 {

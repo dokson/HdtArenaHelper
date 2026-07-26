@@ -2,14 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using HdtArenaHelper.Numerics;
 using HearthDb;
 using Newtonsoft.Json.Linq;
-using HdtArenaHelper.Numerics;
-using System.Runtime.CompilerServices;
 
 // The trainer's deterministic pieces (weight rounding, metrics format, the shrink
 // derivation) are internal but tested: HdtArenaHelper.Training.Tests covers them.
 [assembly: InternalsVisibleTo("HdtArenaHelper.Training.Tests")]
+// CardPoolDump.Build() so HdtArenaHelper.Tests can drift-test the committed card database
+// against the live HearthDb it already references, without a second copy of the projection.
+[assembly: InternalsVisibleTo("HdtArenaHelper.Tests")]
 
 
 namespace HdtArenaHelper.Training
@@ -34,6 +37,12 @@ namespace HdtArenaHelper.Training
 			{
 				var trainingDir = FindTrainingDir();
 				Console.WriteLine($"training dir: {trainingDir}");
+
+				if(args.Any(a => string.Equals(a, "--dump-cards", StringComparison.OrdinalIgnoreCase)))
+				{
+					CardPoolDump.Run(Directory.GetParent(trainingDir)!.FullName);
+					return 0;
+				}
 
 				PayloadFetcher.SnapshotDir = Path.Combine(trainingDir, ".snapshot");
 				PayloadFetcher.Offline = args.Any(a => string.Equals(a, "--offline", StringComparison.OrdinalIgnoreCase));

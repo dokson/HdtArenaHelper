@@ -30,6 +30,15 @@
     <ProjectReference Include="..\HdtArenaHelper.Training\HdtArenaHelper.Training.csproj" />
   </ItemGroup>
 
+  <!--
+    The generated card pool. This project owns the generator, so it compiles its output: a change
+    to CardPoolDump that emits source which no longer builds fails HERE, next to the code that
+    caused it, rather than in one of the other two test projects.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="HearthstoneDeckTracker">
       <HintPath>$(HSDTPath)\HearthstoneDeckTracker.exe</HintPath>

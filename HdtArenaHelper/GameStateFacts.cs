@@ -1,6 +1,6 @@
 using System.Collections.Generic;
-using HearthDb.Enums;
 using HearthDb;
+using HearthDb.Enums;
 
 namespace HdtArenaHelper
 {

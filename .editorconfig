@@ -7,13 +7,64 @@ insert_final_newline = true
 trim_trailing_whitespace = true
 
 # C# — tabs, matching Hearthstone Deck Tracker's own style.
+#
+# Every setting below is sorted alphabetically inside its group, and the groups run
+# formatting → using directives → analyzer severities → style preferences. Sorted on purpose:
+# `Directory.Build.props` turns these into build ERRORS, so this file is the rule book, and a
+# rule book nobody can scan is one where a duplicate or a contradiction hides.
+#
+# Note which of these are ENFORCED and which are advice. A `:suggestion` severity is an IDE hint
+# and never fails a build; the `dotnet_diagnostic.*.severity = warning` lines are the enforced
+# ones, because warnings are errors here. Formatting and using-order have no diagnostic of their
+# own — IDE0055 is what enforces them, which is why the two blocks are next to each other.
 [*.cs]
-indent_style = tab
+
+# Layout.
 csharp_new_line_before_catch = true
 csharp_new_line_before_else = true
 csharp_new_line_before_finally = true
 csharp_new_line_before_open_brace = all
 csharp_space_after_keywords_in_control_flow_statements = false
+indent_style = tab
+
+# Using directives: System first, then everything else alphabetically, as one block with no blank
+# lines splitting it. Measured before choosing: plain alphabetical (System last, after HearthDb and
+# HdtArenaHelper) would have put 44 of the repo's files in violation, so this is the order the code
+# already has rather than a rewrite of every file's header.
+#
+# NOT enforced by the build, and do not add a `dotnet_diagnostic` line hoping to fix that: using
+# order is not a Roslyn diagnostic. `dotnet format` reports it under the id `IMPORTS`, so the gate
+# is the `dotnet format --verify-no-changes` step in build.yml. Verified by scrambling a file's
+# usings: the build stayed at 0 warnings and `dotnet format` failed.
+dotnet_separate_import_directive_groups = false
+dotnet_sort_system_directives_first = true
+
+# Enforced analyzers. Each of these is a build error via Directory.Build.props, so the comment
+# says what the rule actually catches — a severity without a reason is a rule nobody can argue with.
+#
+# IDE0005 — unused using directive. Keeps a file's dependencies honest: a using left behind after a
+#   refactor claims a coupling that no longer exists.
+dotnet_diagnostic.IDE0005.severity = warning
+# IDE0035 — unreachable code. Code after a return or throw is either dead or a control-flow bug,
+#   and both are worth a build failure.
+dotnet_diagnostic.IDE0035.severity = warning
+# IDE0044 — private field that is never reassigned should be `readonly`. States the intent in the
+#   type system instead of leaving a reader to prove it by scanning the class.
+dotnet_diagnostic.IDE0044.severity = warning
+# IDE0051 — unused private member. A private method nobody calls is either dead weight or a rule
+#   that silently stopped firing, which is the failure mode this project keeps paying for.
+dotnet_diagnostic.IDE0051.severity = warning
+# IDE0052 — private member that is written but never read. Usually a value someone meant to use:
+#   the assignment looks like a working feature and does nothing.
+dotnet_diagnostic.IDE0052.severity = warning
+# IDE0055 — formatting. Enforces the indent_style and the using rules above, both of which were
+#   DECLARED and unchecked until this was adopted, which is how a mis-indented line reached review.
+dotnet_diagnostic.IDE0055.severity = warning
+# IDE0059 — value assigned to a local is never used. On a scoring path an unused assignment is
+#   usually a computed number that never reached the score.
+dotnet_diagnostic.IDE0059.severity = warning
+
+# Style preferences — IDE hints only, never enforced (`:suggestion` / `:none`).
 csharp_style_conditional_delegate_call = true:suggestion
 csharp_style_expression_bodied_accessors = true:none
 csharp_style_expression_bodied_constructors = true:none
@@ -28,7 +79,6 @@ csharp_style_throw_expression = true:suggestion
 csharp_style_var_elsewhere = true:suggestion
 csharp_style_var_for_built_in_types = true:suggestion
 csharp_style_var_when_type_is_apparent = true:suggestion
-dotnet_diagnostic.IDE0005.severity = warning
 dotnet_style_coalesce_expression = true:suggestion
 dotnet_style_collection_initializer = true:suggestion
 dotnet_style_explicit_tuple_names = true:suggestion

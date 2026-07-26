@@ -34,6 +34,31 @@ namespace HdtArenaHelper
 		private const int LateMidTurn = 4;
 
 		/// <summary>
+		/// A hand whose CHEAPEST card lands no earlier than this has no early game at all, and goes
+		/// back whole. Four rather than three because a three-drop is a real curve play — the hand
+		/// that must be dug out of is the one where the first thing you can do arrives on turn four.
+		/// Not a tuning knob: it is the same turn <see cref="LateMidTurn"/> names, read from the hand
+		/// instead of from one card.
+		/// </summary>
+		private const int NoEarlyPlayTurn = 4;
+
+		/// <summary>
+		/// The smallest real opening hand: 3 going first, 4 on the coin. Hearthstone's own number,
+		/// and the same one <c>MulliganWatcher</c> reads the coin from. Rules that judge the HAND
+		/// rather than a card are gated on it — a one- or two-card list is a caller isolating a
+		/// single card, and "this hand has no early play" is not a claim you can make about it.
+		/// </summary>
+		private const int OpeningHandSize = 3;
+
+		/// <summary>
+		/// Below this many cheap permanents, a deck cannot be relied on to hand you a turn-1-2 play
+		/// and its three-drop becomes the early game. Roughly a third of a deck's ~19 minions: above
+		/// that a random opener holds a cheap body more often than not, so keeping a three-drop is
+		/// keeping the slower of two cards you will both draw.
+		/// </summary>
+		private const int ThinEarlyGame = 6;
+
+		/// <summary>
 		/// The 0-100 score above which an expensive card stops being "too slow" and becomes the
 		/// reason you are in the game at all. Arena is decided by bombs as often as by curve, and
 		/// a card that wins the game on turn 6 is worth the two awkward turns before it — players
@@ -56,8 +81,22 @@ namespace HdtArenaHelper
 		private static bool IsSelfDiscounting(Card card)
 		{
 			var text = CleanText(card);
-			return text.Length > 0 && DiscountRe.IsMatch(text);
+			if(text.Length == 0)
+				return false;
+			// Strip discounts aimed at ANOTHER card before asking whether this one discounts ITSELF.
+			// Alter Time reads "Discover two Arcane spells from the past. They cost (2) less" — the
+			// discount is on what it finds, not on Alter Time, but the bare pattern read it as
+			// self-discounting and so exempted it from every top-end rule. Seen live: a 4-mana spell
+			// sitting behind a 3-drop in hand came back Situational when it should have gone back.
+			// Measured on the pool, 66 of the 454 cards the old check matched are this shape — a
+			// pronoun subject ("It costs (1) less", "They cost (2) less") always points at another card.
+			var own = OtherCardDiscountRe.Replace(text, " ");
+			return DiscountRe.IsMatch(own);
 		}
+
+		private static readonly Regex OtherCardDiscountRe = new Regex(
+			@"\b(they|it|them|those|these)\s+costs?\s*\(\d+\)\s*less\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 		/// <summary>
 		/// Cards whose effect needs a board you do not have yet. A Battlecry that returns, buffs or
@@ -76,6 +115,66 @@ namespace HdtArenaHelper
 			@"\bfriendly\s+\w+|\banother minion\b|\bchoose a minion\b|\bminion you control\b" +
 			@"|\badjacent\b|\byour\s+(minions|beasts|murlocs|dragons|demons|pirates|elementals" +
 			@"|mechs|totems|undead|naga|quilboar|whelps)\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// Does this card put an extra body on the board by itself? Read off the text rather than a
+		/// tag because the summon can hang off a Battlecry, a Deathrattle or nothing at all, and all
+		/// three answer the only question here: is the printed statline the whole play.
+		/// </summary>
+		private static bool SummonsABody(Card card)
+		{
+			var text = CleanText(card);
+			return text.Length > 0 && SummonsRe.IsMatch(text);
+		}
+
+		private static readonly Regex SummonsRe = new Regex(@"\bsummon\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// Does trading this card IMPROVE it, rather than merely cycle it? Gated on the TRADEABLE tag
+		/// as well as the text, so a card that merely talks about trading is not swept in.
+		/// </summary>
+		private static bool HasTradeUpside(Card card)
+		{
+			if(card.Entity.GetTag(GameTag.TRADEABLE) == 0)
+				return false;
+			var text = CleanText(card);
+			return text.Length > 0 && TradeUpsideRe.IsMatch(text);
+		}
+
+		private static readonly Regex TradeUpsideRe = new Regex(
+			@"\btrade to upgrade\b|\bupgrades?\b[^.]*\bwhen traded\b"
+			+ @"|\bafter you trade this\b|\bwhen you draw this\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// Does this card hand you something back when it DIES? Gated on the DEATHRATTLE tag and not
+		/// on the text alone, because the payment has to be on death: a Battlecry that drew a card was
+		/// already paid whether the body then lives or dies, so it says nothing about trading the body.
+		/// A summoning deathrattle is already covered by <see cref="SummonsABody"/>.
+		/// </summary>
+		private static bool ReplacesItselfOnDeath(Card card)
+		{
+			if(card.Entity.GetTag(GameTag.DEATHRATTLE) == 0)
+				return false;
+			var text = CleanText(card);
+			return text.Length > 0 && DeathValueRe.IsMatch(text);
+		}
+
+		/// <summary>
+		/// Will this small body die to the opponent's hero power for nothing? Unknown hero power means
+		/// YES, deliberately: the fail-safe direction is to keep warning, because relaxing the rule on
+		/// missing data is the error that loses a board.
+		/// </summary>
+		private static bool DiesFreeToHeroPower(Card card, Card? opponentHeroPower)
+			=> opponentHeroPower == null
+				|| HeroPowerThreat.KillsForFree(opponentHeroPower, card.Health);
+
+		// CleanText collapses whitespace, so plain spaces are safe here — unlike the synergy engine's
+		// patterns, which read the un-collapsed form and must use \s+ (see CardText).
+		private static readonly Regex DeathValueRe = new Regex(
+			@"\badd\b[^.]*\bto your hand\b|\bdraw\b",
 			RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
 		private static readonly Regex DiscountRe = new Regex(
@@ -108,7 +207,8 @@ namespace HdtArenaHelper
 		private const double PlayableScore = 50.0;
 
 		public IReadOnlyList<MulliganCardVerdict> Evaluate(IReadOnlyList<int> handDbfIds,
-			IReadOnlyList<int> deckDbfIds, CardClass deckClass, bool onCoin)
+			IReadOnlyList<int> deckDbfIds, CardClass deckClass, bool onCoin,
+			Card? opponentHeroPower = null)
 		{
 			var empty = new MulliganCardVerdict[0];
 			if(handDbfIds == null || handDbfIds.Count == 0 || deckDbfIds == null)
@@ -126,9 +226,12 @@ namespace HdtArenaHelper
 			if(deck.Count < 20)
 				return empty;
 
+			// Judged left to right, and the verdicts so far are an INPUT to the next card: the
+			// "second of its slot" rule has to know which earlier cards actually turned out to be
+			// early plays, not merely which ones share a cost.
 			var verdicts = new List<MulliganCardVerdict>(hand.Count);
 			for(var i = 0; i < hand.Count; i++)
-				verdicts.Add(Judge(hand[i]!, i, hand!, deck, onCoin, _score));
+				verdicts.Add(Judge(hand[i]!, i, hand!, deck, onCoin, _score, verdicts, opponentHeroPower));
 			return verdicts;
 		}
 
@@ -138,7 +241,8 @@ namespace HdtArenaHelper
 		/// deck does not actually make true.
 		/// </summary>
 		private static MulliganCardVerdict Judge(Card card, int index, IReadOnlyList<Card> hand,
-			IReadOnlyList<Card> deck, bool onCoin, Func<int, double?>? score)
+			IReadOnlyList<Card> deck, bool onCoin, Func<int, double?>? score,
+			IReadOnlyList<MulliganCardVerdict> earlier, Card? opponentHeroPower)
 		{
 			var isBody = card.Type == CardType.MINION;
 
@@ -172,25 +276,53 @@ namespace HdtArenaHelper
 			var isPermanent = card.Type == CardType.MINION || card.Type == CardType.WEAPON
 				|| card.Type == CardType.LOCATION;
 
-			if(card.Cost >= 1 && turn <= EarlyCost && isPermanent && AffectsBoard(card))
+			// How far "early" reaches is a property of the DECK, not of the game. A three-drop is
+			// not an early play in the abstract, but a deck that cannot curve out has no earlier
+			// one to draw into, and mulliganing away its first body chases cards it does not hold.
+			// Widening the window rather than adding a second rule keeps every guard below — the
+			// duplicate slot, the quality floor, the empty board, Combo, one health — applying to
+			// the three-drop exactly as they do to the two-drop.
+			var earlyWindow = CountEarlyPermanents(deck) < ThinEarlyGame ? EarlyCost + 1 : EarlyCost;
+
+			if(card.Cost >= 1 && turn <= earlyWindow && isPermanent && AffectsBoard(card))
 			{
 				// The one deck-relative exception, kept here rather than as a later rule so it can
 				// only ever DOWNGRADE a keep: holding a second copy of a slot the deck can refill
 				// is not a second early play, it is one early play and a spare.
-				var secondOfItsSlot = hand.Take(index).Count(c => c.Cost == card.Cost) >= 1
-					&& deck.Count(c => c.Cost == card.Cost) >= 3;
+				// It counts earlier KEEPS, not earlier cards of the same cost. Sharing a cost with a
+				// card that was itself demoted is not a duplicated slot: a hand of Dance Floor (a
+				// 2-mana location wanting a board that does not exist yet) plus a real 2-drop holds
+				// exactly one early play, and reading it as two threw away the only one.
+				var secondOfItsSlot = deck.Count(c => c.Cost == card.Cost) >= 3
+					&& earlier.Where((v, i) => v.Verdict == MulliganVerdict.Keep
+						&& hand[i].Cost == card.Cost).Any();
 				if(secondOfItsSlot)
 					return new MulliganCardVerdict(MulliganVerdict.Situational,
 						$"second {card.Cost}-drop");
 
-				// Tempo is necessary, not sufficient. A cheap card the win-rate data rates below
-				// the pool median buys a turn with a card that loses it back, and players do not
-				// keep those — which is what separated the keeps from the misses when this rule was
-				// cost-only. No score (a card nothing has measured) leaves the tempo rule standing.
+				// Tempo is necessary, not sufficient: a cheap card the win-rate data rates below the
+				// pool median buys a turn with a card that loses it back. But "below the pool median"
+				// is an answer to the DRAFT's question, and asking it here contradicted this class's
+				// own premise — the draft score already said whether the card is good, and the
+				// mulligan asks whether it is your best play on that turn given the other 27 cards.
+				// Seen live: Wild Pyromancer is genuinely below average for a Mage (48.8% drawn
+				// against a 51.3% class median) and was demoted in a deck that had nothing better at
+				// two mana, where a mediocre turn-2 play still beats an empty turn 2.
+				//
+				// So the score is a COMPARISON here, not a gate: it demotes only when the deck can
+				// actually do better in this same slot. At the top end it stays an absolute judgement,
+				// because there is no slot to compare within — you are deciding whether a card you
+				// cannot cast for five turns is worth holding, and only its own quality answers that.
 				var quality = score?.Invoke(card.DbfId);
 				if(quality.HasValue && quality.Value < PlayableScore)
-					return new MulliganCardVerdict(MulliganVerdict.Situational,
-						"weak for the slot");
+				{
+					var better = CountBetterInSlot(deck, card, quality.Value, score);
+					if(better >= BetterInSlotToDemote)
+						return new MulliganCardVerdict(MulliganVerdict.Situational,
+							$"weak for the slot ({better} better at {card.Cost})");
+					return new MulliganCardVerdict(MulliganVerdict.Keep,
+						$"your best {card.Cost}-drop");
+				}
 
 				// A body whose effect needs a friendly board is not the turn-1 play it looks like.
 				if(NeedsExistingBoard(card))
@@ -208,9 +340,34 @@ namespace HdtArenaHelper
 				// hero power, several of them while developing their own board. Sparing the 3/1s
 				// that trade up was tried and bought three more calls at the price of three more
 				// wrong ones, which is not a trade this advisor makes.
-				if(card.Type == CardType.MINION && card.Health <= 1)
+				// The exception is a card that brings a SECOND body: Maze Guide is a 1/1 whose
+				// Battlecry lands a 2-drop beside it, so the hero power that eats the 1/1 still
+				// leaves the board contested. The printed statline is not the play — the same
+				// lesson weapons and locations already taught this class, one field over.
+				// The second exception is a body that PAYS YOU WHEN IT DIES. "Dies for free" is a claim
+				// about the opponent's side of the trade, and it is false when the ping hands you cards:
+				// Sinful Sous Chef is a 1-mana 2/1 whose Deathrattle puts two Silver Hand Recruits in
+				// your hand, so the hero power that kills it buys them nothing. Seen live, demoted with
+				// the reason line "1 health, dies for free" printed over a card that does the opposite.
+				// And the third condition is the OPPONENT's hero power, because "dies for free" was
+				// always a claim about their side of the board. Verified live and derived from the card
+				// rather than the class (dual-class heroes make the class the wrong question): of the
+				// eleven basic hero powers only Mage's Fireblast and the Death Knight's Charge Ghoul
+				// kill a one-health body for nothing. Druid, Demon Hunter and Rogue can kill it by
+				// swinging the hero, but eat its attack doing so — which is exactly why a 3/1 and a 2/1
+				// are different cards to hold — and the remaining six answer it not at all.
+				//
+				// An UNKNOWN hero power keeps the old demotion (KillsForFree returns false only when it
+				// can prove the body survives). Relaxing a rule on missing data would advise keeping a
+				// fragile body against an opponent we simply failed to read, and that error costs the
+				// board while the conservative one costs nothing.
+				if(card.Type == CardType.MINION && card.Health <= 1
+					&& !SummonsABody(card) && !ReplacesItselfOnDeath(card)
+					&& DiesFreeToHeroPower(card, opponentHeroPower))
 					return new MulliganCardVerdict(MulliganVerdict.Situational,
-						"1 health, dies for free");
+						opponentHeroPower == null
+							? "1 health, dies for free"
+							: $"1 health, dies to {opponentHeroPower.Name}");
 
 				return new MulliganCardVerdict(MulliganVerdict.Keep,
 					card.Type == CardType.WEAPON
@@ -235,6 +392,39 @@ namespace HdtArenaHelper
 				return new MulliganCardVerdict(MulliganVerdict.Toss,
 					"no board impact");
 
+			// 4b. A hand that does NOTHING until turn 4 goes back whole, and this is the one rule that
+			//     reads the hand rather than a card. Every other rule here is relative — "cheap for its
+			//     slot", "behind a cheaper play", "top end" — so each of these cards looked defensible
+			//     on its own while the hand as a whole had no play at all. Seen live: a Mage going
+			//     first held two 4-drops and a 5-drop and got three abstentions, which is exactly the
+			//     hand a player does not need help with and exactly the call the plugin owed them.
+			//
+			//     It sits ABOVE the top-end rule deliberately, because that one abstains when the card
+			//     has no win-rate and would otherwise leave the most expensive card in a dead hand
+			//     unjudged. This rule needs no data: "there is nothing to play before turn 4" is a
+			//     fact about the hand, not an estimate, and the mulligan exists to dig for one.
+			//
+			//     Read in EFFECTIVE turns, so the Coin is already accounted for — a 4-drop on the coin
+			//     is a turn-3 play and does not trigger this.
+			//
+			//     The two standing exemptions hold: a self-discounting card (its printed cost is not
+			//     the cost you pay) and a MEASURED bomb. The bomb one is deliberate and narrow — it
+			//     needs a real score above the bomb threshold, so the unscored expensive card that
+			//     prompted this rule is still tossed, and only a card the data calls a game-winner
+			//     survives a hand with no early game.
+			//     Gated on a REAL opening hand — 3 cards going first, 4 on the coin, which is the same
+			//     fact MulliganWatcher reads the coin from. "The hand has no early play" is a claim
+			//     about a whole hand, and a shorter list is a caller isolating one card, not a hand.
+			//
+			//     A card with a trade upside COUNTS as an early play, for the same reason rule 5a
+			//     exists: one mana turns it into a better card and draws a replacement, so a hand
+			//     holding one is not doing nothing on turn 1.
+			if(turn >= NoEarlyPlayTurn && !IsSelfDiscounting(card) && !IsBomb(card, score)
+				&& hand.Count >= OpeningHandSize
+				&& hand.All(c => EffectiveTurn(c, onCoin) >= NoEarlyPlayTurn && !HasTradeUpside(c)))
+				return new MulliganCardVerdict(MulliganVerdict.Toss,
+					$"nothing before turn {NoEarlyPlayTurn}");
+
 			// 5. The top end goes back, and this is the other half of the tempo rule: a card that
 			//    cannot be cast for five turns is not a plan, it is a card you would rather draw
 			//    later. Cards that DISCOUNT themselves are exempt — a printed cost is not the cost
@@ -244,6 +434,34 @@ namespace HdtArenaHelper
 			// all — a card no win-rate covers — a slow card and a game-winner look identical from
 			// here, and the honest move is to say nothing rather than mulligan away the reason the
 			// player is in the game.
+			// 5a. A card that gets BETTER when you trade it has a real turn-1 play: one mana upgrades it
+			//     and draws a replacement, so the printed cost is not the only thing you can do with it
+			//     — the same reason self-discounting cards are exempt below. Wind-Up Enforcer is a
+			//     6-mana 3/5 that the top-end rule was sending back as flatly "too slow", which is the
+			//     call that started this.
+			//
+			//     Being TRADEABLE is NOT enough, and that distinction is the rule. A plain Tradeable
+			//     card only cycles, and cycling an expensive card you did not want is worse than the
+			//     free replacement a mulligan already gives you — so those still go back. Measured on
+			//     the pool: 54 collectible Tradeable cards, of which only NINE carry a trade upside,
+			//     and only two of those (Wind-Up Enforcer and Wind-Up Musician) are expensive enough to
+			//     reach this rule at all. A narrow rule on purpose.
+			//
+			//     Four wordings, all found by reading the pool rather than by guessing — the first
+			//     attempt matched two of them and missed Wicked Shipment, Blackwater Cutlass and Line
+			//     Cook: "(Trade to upgrade!)", "Upgrades … when Traded!", "After you Trade this, …",
+			//     and Line Cook's "When you draw this, get a copy of it" (a trade draws, so the upside
+			//     is the same). Re-validate against the pool if this is touched.
+			//
+			//     Situational, NOT Keep: the upgrade is value, not board presence. And it applies ONLY
+			//     when turn 1 is otherwise empty — the trade is worth something because it uses a mana
+			//     that was going to be wasted, so once the hand holds a real turn-1 play the two compete
+			//     for it and the expensive card goes back.
+			if(turn >= TopEndCost && HasTradeUpside(card)
+				&& !hand.Where((c, i) => i != index).Any(c => EffectiveTurn(c, onCoin) <= 1))
+				return new MulliganCardVerdict(MulliganVerdict.Situational,
+					"upgrades when traded, and turn 1 is free");
+
 			if(turn >= TopEndCost && !IsSelfDiscounting(card))
 			{
 				var quality = score?.Invoke(card.DbfId);
@@ -275,6 +493,58 @@ namespace HdtArenaHelper
 			return new MulliganCardVerdict(MulliganVerdict.Situational);
 		}
 
+		/// <summary>
+		/// How many cards at the SAME cost the deck holds that score better than this one. Same cost
+		/// rather than the whole early window, deliberately: a deck rich in good 1-drops does not make
+		/// its only 2-drop skippable, since the two are played on different turns — and it is the rule
+		/// <c>secondOfItsSlot</c> already uses, so both read "slot" the same way.
+		///
+		/// Deck cards nothing has measured are skipped: an unscored card cannot be called better, and
+		/// counting it would demote a real play in favour of an unknown one.
+		/// </summary>
+		private static int CountBetterInSlot(IReadOnlyList<Card> deck, Card card, double quality,
+			Func<int, double?>? score)
+		{
+			if(score == null)
+				return 0;
+			var better = 0;
+			foreach(var other in deck)
+			{
+				if(other.Cost != card.Cost || other.DbfId == card.DbfId)
+					continue;
+				var value = score(other.DbfId);
+				if(value.HasValue && value.Value > quality)
+					better++;
+			}
+			return better;
+		}
+
+		/// <summary>
+		/// How many better cards at the same cost it takes before the deck counts as covering that
+		/// slot. TWO, not one: a single better card among thirty is one you will probably not have
+		/// drawn by the turn in question, so demoting the card in hand for it trades a play you hold
+		/// for a play you might see.
+		/// </summary>
+		private const int BetterInSlotToDemote = 2;
+
+		/// <summary>
+		/// The deck's cheap PERMANENTS — the cards that can actually contest turns one and two.
+		/// Spells are excluded for the same reason the synergy engine's curve rule excludes them:
+		/// a deck full of cheap removal still has nothing to play on turn two.
+		/// </summary>
+		private static int CountEarlyPermanents(IReadOnlyList<Card> deck)
+		{
+			var count = 0;
+			foreach(var card in deck)
+			{
+				if(card.Cost >= 1 && card.Cost <= EarlyCost
+					&& (card.Type == CardType.MINION || card.Type == CardType.WEAPON
+						|| card.Type == CardType.LOCATION))
+					count++;
+			}
+			return count;
+		}
+
 		/// <summary>The turn this card first plays, which is one earlier with the Coin.</summary>
 		private static int EffectiveTurn(Card card, bool onCoin)
 			=> onCoin ? System.Math.Max(1, card.Cost - 1) : card.Cost;
@@ -282,20 +552,15 @@ namespace HdtArenaHelper
 		private static Card? Resolve(int dbfId) => Cards.GetFromDbfId(dbfId);
 
 		/// <summary>
-		/// Card text with markup stripped and newlines collapsed. Not cosmetic: the client wraps
-		/// text mid-sentence, and `.` does not cross a newline, so "Add a random 1, 2,\nand 3-Cost
+		/// Card text with markup stripped and newlines collapsed — <see cref="CardText.Flattened"/>,
+		/// which now owns the convention. Collapsing is not cosmetic: the client wraps text
+		/// mid-sentence, and `.` does not cross a newline, so "Add a random 1, 2,\nand 3-Cost
 		/// Elemental to your hand" silently fails every pattern spanning two words — and fails
 		/// SILENTLY, which is how it survived: the rule simply never matched and the card fell
-		/// through to a verdict that looked plausible.
+		/// through to a verdict that looked plausible. The synergy engine then hit the same trap
+		/// from the other side, which is why the rule lives in one place now.
 		/// </summary>
-		private static string CleanText(Card card)
-			=> string.IsNullOrEmpty(card.Text)
-				? string.Empty
-				: WhitespaceRe.Replace(MarkupRe.Replace(card.Text, " "), " ");
-
-		private static readonly Regex MarkupRe = new Regex(@"<[^>]+>|\[x\]",
-			RegexOptions.Compiled);
-		private static readonly Regex WhitespaceRe = new Regex(@"\s+", RegexOptions.Compiled);
+		private static string CleanText(Card card) => CardText.Flattened(card);
 
 
 		/// <summary>

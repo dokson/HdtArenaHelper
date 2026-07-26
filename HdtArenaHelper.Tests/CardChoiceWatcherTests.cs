@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
-using HearthDb;
+using HdtArenaHelper.CardDatabase;
 using HearthDb.Enums;
 using Xunit;
 using MirrorCard = HearthMirror.Objects.Card;
@@ -14,15 +14,23 @@ namespace HdtArenaHelper.Tests
 	/// </summary>
 	public class CardChoiceWatcherTests
 	{
-		private static int Dbf(string cardId) => Cards.All[cardId].DbfId;
+		private static int Dbf(CardEntry card) => card.DbfId;
 
-		private static List<MirrorCard> Deck(params (string CardId, int Copies)[] cards)
-			=> cards.Select(c => new MirrorCard(c.CardId, c.Copies, 0)).ToList();
+		private static readonly CardEntry Yeti = HSCard.ChillwindYeti;
+		private static readonly CardEntry Raptor = HSCard.BloodfenRaptor;
+
+		// The watcher is handed card ids by the client, so the fixtures produce ids — taken from the
+		// named pool, never typed out.
+		private static List<MirrorCard> Deck(params (CardEntry Card, int Copies)[] cards)
+			=> cards.Select(c => new MirrorCard(c.Card.CardId, c.Copies, 0)).ToList();
+
+		private static string[] Offered(params CardEntry[] cards)
+			=> cards.Select(c => c.CardId).ToArray();
 
 		// A Priest hero and a two-card deck: enough to be a valid arena run.
-		private const string PriestHero = "HERO_09";
+		private static readonly string PriestHero = HSCard.AnduinWrynn.CardId;
 		// A real Priest hero power: the dual-class path reads the class off this when Hero is empty.
-		private const string PriestHeroPower = "AV_207p";
+		private static readonly string PriestHeroPower = HSCard.HolyTouch.CardId;
 
 		[Fact]
 		public void No_offered_cards_means_nothing_to_show()
@@ -38,7 +46,7 @@ namespace HdtArenaHelper.Tests
 			// win-rate. Outside an arena run there is no number it is entitled to show, so a missing
 			// deck must return null rather than falling back to class-agnostic scores.
 			Assert.Null(CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182" }, deckCards: null, hero: PriestHero, heroPower: null));
+				Offered(Yeti), deckCards: null, hero: PriestHero, heroPower: null));
 		}
 
 		[Fact]
@@ -50,11 +58,11 @@ namespace HdtArenaHelper.Tests
 			// It is also transient — HearthDb may still be loading — so returning null lets the next
 			// poll retry, where consuming the choice would have frozen it half-built.
 			Assert.Null(CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182", "NOT_A_REAL_CARD_ID", "CS2_172" }, Deck(), PriestHero, null));
+				new[] { Yeti.CardId, "NOT_A_REAL_CARD_ID", Raptor.CardId }, Deck(), PriestHero, null));
 
 			var whole = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182", "CS2_172" }, Deck(), PriestHero, null);
-			Assert.Equal(new[] { Dbf("CS2_182"), Dbf("CS2_172") }, whole!.Args.OfferedDbfIds);
+				Offered(Yeti, Raptor), Deck(), PriestHero, null);
+			Assert.Equal(new[] { Dbf(Yeti), Dbf(Raptor) }, whole!.Args.OfferedDbfIds);
 		}
 
 		[Fact]
@@ -64,11 +72,11 @@ namespace HdtArenaHelper.Tests
 			// reordering would put every score over the wrong card. The signature follows that order
 			// so that re-polling the same choice is deduped while a genuinely new one is not.
 			var plan = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_172", "CS2_182" }, Deck(), PriestHero, null);
+				Offered(Raptor, Yeti), Deck(), PriestHero, null);
 			var reordered = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182", "CS2_172" }, Deck(), PriestHero, null);
+				Offered(Yeti, Raptor), Deck(), PriestHero, null);
 
-			Assert.Equal($"{Dbf("CS2_172")},{Dbf("CS2_182")}", plan!.Signature);
+			Assert.Equal($"{Dbf(Raptor)},{Dbf(Yeti)}", plan!.Signature);
 			Assert.NotEqual(plan.Signature, reordered!.Signature);
 		}
 
@@ -78,9 +86,9 @@ namespace HdtArenaHelper.Tests
 			// Same rule as the draft watcher: dual-class arena leaves Deck.Hero empty and carries the
 			// class on the hero power instead.
 			var fromHero = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182" }, Deck(), PriestHero, null);
+				Offered(Yeti), Deck(), PriestHero, null);
 			var fromPower = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182" }, Deck(), null, PriestHeroPower);
+				Offered(Yeti), Deck(), null, PriestHeroPower);
 
 			Assert.Equal(CardClass.PRIEST, fromHero!.Args.DeckClass);
 			Assert.Equal(CardClass.PRIEST, fromPower!.Args.DeckClass);
@@ -89,7 +97,7 @@ namespace HdtArenaHelper.Tests
 		[Fact]
 		public void An_unknown_hero_leaves_the_class_invalid_rather_than_guessing()
 		{
-			var plan = CardChoiceWatcher.BuildChoicePlan(new[] { "CS2_182" }, Deck(), null, null);
+			var plan = CardChoiceWatcher.BuildChoicePlan(Offered(Yeti), Deck(), null, null);
 
 			Assert.NotNull(plan);
 			Assert.Equal(CardClass.INVALID, plan!.Args.DeckClass);
@@ -101,10 +109,10 @@ namespace HdtArenaHelper.Tests
 			// The synergy engine counts members, so two copies must arrive as two entries — a deck
 			// deduped to distinct cards would under-count every tribe and every curve slot.
 			var plan = CardChoiceWatcher.BuildChoicePlan(
-				new[] { "CS2_182" }, Deck(("CS2_172", 2), ("CS2_182", 1)), PriestHero, null);
+				Offered(Yeti), Deck((Raptor, 2), (Yeti, 1)), PriestHero, null);
 
 			Assert.Equal(3, plan!.Args.DeckDbfIds.Count);
-			Assert.Equal(2, plan.Args.DeckDbfIds.Count(id => id == Dbf("CS2_172")));
+			Assert.Equal(2, plan.Args.DeckDbfIds.Count(id => id == Dbf(Raptor)));
 		}
 	}
 }

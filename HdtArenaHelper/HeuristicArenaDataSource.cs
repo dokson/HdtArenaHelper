@@ -278,14 +278,10 @@ namespace HdtArenaHelper
 				f["tx_restore_amt"] = heal;
 		}
 
-		private static readonly Regex Markup = new Regex(@"<[^>]+>|\[x\]", RegexOptions.Compiled);
-
-		// Shared with MetadataSynergyEngine so both read the same normalized card text.
-		internal static string CleanText(Card card)
-		{
-			var text = card.GetLocText(Locale.enUS) ?? "";
-			return Markup.Replace(text, " ").ToLowerInvariant();
-		}
+		// The normalization itself lives in CardText, which owns the whitespace convention every
+		// pattern here depends on. Kept as a named member because the goldens and the trainer read
+		// the features these patterns produce, so the text they see must not drift.
+		internal static string CleanText(Card card) => CardText.Normalized(card);
 
 		// BuildFeatures runs ~33 distinct patterns per card and is called per card per score, but
 		// the static Regex.IsMatch cache holds only 15 entries — so every feature extraction used

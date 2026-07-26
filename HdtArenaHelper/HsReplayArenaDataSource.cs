@@ -77,6 +77,8 @@ namespace HdtArenaHelper
 			public Dictionary<CardClass, double> ClassScore { get; } // class -> 0..100 (tier list)
 			public Dictionary<CardClass, double> ClassWinRate { get; } // class -> estimated win-rate %
 			public Dictionary<CardClass, Dictionary<Race, double>> ClassTribeShare { get; } // class -> race -> %
+																							// The same, for categories identified by a tag (Secret, Aura) rather than a race.
+			public Dictionary<CardClass, Dictionary<GameTag, double>> ClassCategoryShare { get; }
 			public Dictionary<CardClass, Dictionary<int, SourceScore>> ClassCardScore { get; }
 			public Dictionary<int, CardClass> HeroClass { get; }     // hero-skin dbfId -> class
 
@@ -86,6 +88,7 @@ namespace HdtArenaHelper
 				Dictionary<CardClass, double> classScore,
 				Dictionary<CardClass, double> classWinRate,
 				Dictionary<CardClass, Dictionary<Race, double>> classTribeShare,
+				Dictionary<CardClass, Dictionary<GameTag, double>> classCategoryShare,
 				Dictionary<CardClass, Dictionary<int, SourceScore>> classCardScore,
 				Dictionary<int, CardClass> heroClass)
 			{
@@ -94,6 +97,7 @@ namespace HdtArenaHelper
 				ClassScore = classScore;
 				ClassWinRate = classWinRate;
 				ClassTribeShare = classTribeShare;
+				ClassCategoryShare = classCategoryShare;
 				ClassCardScore = classCardScore;
 				HeroClass = heroClass;
 			}
@@ -135,6 +139,14 @@ namespace HdtArenaHelper
 			if(data == null || !data.ClassTribeShare.TryGetValue(cls, out var byRace))
 				return null;
 			return byRace.TryGetValue(race, out var share) ? share : (double?)null;
+		}
+
+		public double? CategoryShare(CardClass cls, GameTag tag)
+		{
+			var data = _data;
+			if(data == null || !data.ClassCategoryShare.TryGetValue(cls, out var byTag))
+				return null;
+			return byTag.TryGetValue(tag, out var share) ? share : (double?)null;
 		}
 
 		public SourceScore? GetNormalizedScore(int dbfId, CardClass draftClass = CardClass.INVALID)
@@ -249,6 +261,7 @@ namespace HdtArenaHelper
 				: ScoreMath.ToScores(classTier);
 			var classWinRates = ParseClassWinRates(json!);
 			var classTribeShares = ParseClassTribeShares(json!);
+			var classCategoryShares = ParseClassCategoryShares(json!);
 			var heroClass = HeroSkins.BuildClassMap();
 
 			// The games behind each ALL score travel with it, so the blend can weight
@@ -258,7 +271,7 @@ namespace HdtArenaHelper
 
 			// Publish all maps at once through the single volatile reference.
 			_data = new Data(raw, cardScore, classScores, classWinRates, classTribeShares,
-				classCardScore, heroClass);
+				classCategoryShares, classCardScore, heroClass);
 			Log($"loaded {raw.Count} cards, {classScores.Count} class tiers, {heroClass.Count} hero skins (source: {source})");
 		}
 
@@ -535,6 +548,64 @@ namespace HdtArenaHelper
 		/// counting them would report Murlocs as available to a class whose only "Murloc" is an
 		/// amalgam, which is the same double-count that once disarmed the dead-card penalty.
 		/// </summary>
+		/// <summary>
+		/// The category counterpart of <see cref="ParseClassTribeShares"/>: how much of each class's
+		/// card usage is Secrets, and how much is Auras. Same popularity weighting, same "re-measured
+		/// every patch" property — which matters more here than for tribes, because which classes even
+		/// HAVE Secrets moves with the pool. Measured on the current payload, Secrets are ~4.2% of
+		/// MAGE, HUNTER and ROGUE slots and 0% everywhere else — including PALADIN, which has Secrets
+		/// in principle but none in this pool. A hand-written class list would already be wrong.
+		/// </summary>
+		private static Dictionary<CardClass, Dictionary<GameTag, double>> ParseClassCategoryShares(string json)
+		{
+			var result = new Dictionary<CardClass, Dictionary<GameTag, double>>();
+			try
+			{
+				var data = PayloadGuard.ParseObject(json)?["data"] as JObject;
+				if(data == null)
+					return result;
+
+				foreach(var prop in data.Properties())
+				{
+					if(prop.Name == "ALL" || !(prop.Value is JArray bucket))
+						continue;
+					if(!Enum.TryParse<CardClass>(prop.Name, ignoreCase: true, out var cls))
+						continue;
+
+					var byTag = new Dictionary<GameTag, double>();
+					double total = 0;
+					foreach(var card in bucket)
+					{
+						var cardId = (string?)card["card_id"];
+						if(string.IsNullOrEmpty(cardId))
+							continue;
+						if(!HearthDb.Cards.All.TryGetValue(cardId, out var dbCard))
+							continue;
+						var popularity = (double?)card["popularity"] ?? 0;
+						if(popularity <= 0)
+							continue;
+
+						total += popularity;
+						foreach(var tag in MetadataSynergyEngine.CategoryTags)
+						{
+							if(dbCard.Entity.GetTag(tag) == 0)
+								continue;
+							byTag.TryGetValue(tag, out var seen);
+							byTag[tag] = seen + popularity;
+						}
+					}
+					if(total <= 0 || byTag.Count == 0)
+						continue;
+					result[cls] = byTag.ToDictionary(kv => kv.Key, kv => 100.0 * kv.Value / total);
+				}
+			}
+			catch(Exception ex)
+			{
+				Log($"class category shares unavailable: {ex.Message}");
+			}
+			return result;
+		}
+
 		private static Dictionary<CardClass, Dictionary<Race, double>> ParseClassTribeShares(string json)
 		{
 			var result = new Dictionary<CardClass, Dictionary<Race, double>>();

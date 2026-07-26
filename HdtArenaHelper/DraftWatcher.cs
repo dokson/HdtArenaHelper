@@ -68,6 +68,30 @@ namespace HdtArenaHelper
 	}
 
 	/// <summary>
+	/// The finished run deck, reported on the run screen between matches so the overlay can describe
+	/// what the deck DOES. Carries the whole deck rather than a summary: the description is computed
+	/// where it is shown, so this stays a fact about the client and not a scoring decision.
+	/// </summary>
+	public class RunSummaryEventArgs : EventArgs
+	{
+		public IReadOnlyList<int> DeckDbfIds { get; }
+		public HearthDb.Enums.CardClass DraftClass { get; }
+		public bool IsUnderground { get; }
+		public int Wins { get; }
+		public int Losses { get; }
+
+		public RunSummaryEventArgs(IReadOnlyList<int> deckDbfIds,
+			HearthDb.Enums.CardClass draftClass, bool isUnderground, int wins, int losses)
+		{
+			DeckDbfIds = deckDbfIds;
+			DraftClass = draftClass;
+			IsUnderground = isUnderground;
+			Wins = wins;
+			Losses = losses;
+		}
+	}
+
+	/// <summary>
 	/// The current deck to rank while the player is editing it (the "Edit Your Deck" /
 	/// discard phase of a redraft), so the overlay can flag the weakest cards to cut.
 	/// </summary>
@@ -106,12 +130,14 @@ namespace HdtArenaHelper
 	{
 		public event EventHandler<DraftChoicesEventArgs>? OnChoicesChanged;
 		public event EventHandler<DeckReviewEventArgs>? OnDeckReview;
+		public event EventHandler<RunSummaryEventArgs>? OnRunSummary;
 		public event EventHandler? OnDraftEnded;
 
 		private int _lastVersion = int.MinValue;
 		private bool _wasDrafting;
 		private bool _unresolvedLogged;
 		private string? _lastReviewSig; // dedup the deck-edit review; re-fire when the deck changes
+		private string? _lastRunSig;    // same, for the run screen: re-fire only when the deck changes
 
 		/// <summary>
 		/// The arena screens all live in the DRAFT scene. The gate is the base's, and it is
@@ -132,6 +158,7 @@ namespace HdtArenaHelper
 			_wasDrafting = false;
 			_unresolvedLogged = false;
 			_lastReviewSig = null;
+			_lastRunSig = null;
 		}
 
 
@@ -161,6 +188,14 @@ namespace HdtArenaHelper
 
 			if(choices == null || choices.Choices == null || choices.Choices.Count == 0)
 			{
+				// No pick on screen. Before hiding, one screen is worth reporting: the RUN screen you
+				// sit on between matches, with the finished deck and Play in front of you. Gated
+				// POSITIVELY on `MIDRUN` and a complete deck rather than on "nothing else is showing",
+				// because this is the screen that produced a ghost overlay twice — an unfinished
+				// redraft reports EDITING_DECK from the main menu, and choices linger here in memory.
+				// "Nothing else is showing" is true of the main menu and Battlegrounds too.
+				if(arenaInfo != null && HandleRunSummary(arenaInfo))
+					return;
 				EndDraft();
 				return;
 			}
@@ -298,15 +333,25 @@ namespace HdtArenaHelper
 			IReadOnlyList<(string Id, int Count)>? runCards,
 			IReadOnlyList<(string Id, int Count)>? redraftCards)
 		{
-			// Union both lists by dbf id: the run deck is the full deck to trim, while the redraft
-			// list holds only the NEW cards being added — ranking either alone misses cards. Keep
-			// the larger copy count on overlap; the count only affects the "xN" label, not the rank.
+			// The RUN DECK alone decides what is in the deck; the redraft list is a FALLBACK for a
+			// client form that exposes no run deck, NOT an addition to it.
+			//
+			// This used to union the two, and that made discards invisible. Verified live: discarding
+			// removes the card from `Deck` immediately (the log shows deckSize 31 -> 30), but
+			// `RedraftDeck` does NOT shrink — it keeps reporting all five arriving cards for the whole
+			// phase. So for any card that was in BOTH lists, the union put it straight back, the
+			// signature never changed, and the panel froze with the discarded card still ranked. Found
+			// on a real client by toggling Divine Toll out of the deck and back: `distinct` stayed at
+			// 25 through every toggle and no re-render fired at all.
+			//
+			// The cost is a client form where `Deck` omits the arriving cards: those would go
+			// unranked. That form has never been observed, while the frozen panel has — and a panel
+			// that silently contradicts the deck on screen is worse than one missing five rows.
 			var byDbf = new Dictionary<int, int>();
-			foreach(var list in new[] { runCards, redraftCards })
+			var authoritative = runCards != null && runCards.Count > 0 ? runCards : redraftCards;
+			if(authoritative != null)
 			{
-				if(list == null)
-					continue;
-				foreach(var c in list)
+				foreach(var c in authoritative)
 				{
 					var dbf = ToDbfId(c.Id);
 					if(dbf == 0)
@@ -336,6 +381,57 @@ namespace HdtArenaHelper
 
 			return new DeckEditPlan(byDbf, deckSize, toDiscard,
 				Math.Max(MinSuggested, toDiscard + SuggestMargin));
+		}
+
+		/// <summary>
+		/// The run screen between matches: a finished deck, and no pick to make. Returns true when it
+		/// took responsibility for the screen, so the caller does NOT hide the overlay.
+		///
+		/// `MIDRUN` is the whole gate, and it has to be: this screen reports as the DRAFT scene (the
+		/// client's arena hub does), so the scene gate alone cannot tell it from the main menu, and
+		/// "no choices on screen" is true of every screen in the game.
+		/// </summary>
+		private bool HandleRunSummary(ArenaInfo arenaInfo)
+		{
+			if(arenaInfo.SessionState != ArenaSessionState.MIDRUN)
+				return false;
+
+			var deck = new List<int>();
+			var cards = arenaInfo.Deck?.Cards;
+			if(cards != null)
+			{
+				foreach(var card in cards)
+				{
+					var dbf = ToDbfId(card.Id);
+					if(dbf == 0)
+						continue;
+					for(var i = 0; i < Math.Max(1, card.Count); i++)
+						deck.Add(dbf);
+				}
+			}
+
+			// A partial read is not a deck. Same reasoning as the pick gate: HearthDb can be empty at
+			// startup, and describing 11 of 30 cards would state a curve the player does not have.
+			if(deck.Count < ArenaDeckSize)
+				return false;
+
+			var draftClass = ToClass(arenaInfo.Deck?.Hero);
+			if(draftClass == HearthDb.Enums.CardClass.INVALID)
+				draftClass = ToClass(arenaInfo.Deck?.HeroPower);
+
+			var sig = deck.Count + ":" + string.Join(",", deck.OrderBy(d => d));
+			if(sig != _lastRunSig)
+			{
+				_lastRunSig = sig;
+				Log($"run screen: {deck.Count} cards, class={draftClass}, "
+					+ $"underground={arenaInfo.IsUnderground}, {arenaInfo.Wins}-{arenaInfo.Losses}");
+				OnRunSummary?.Invoke(this,
+					new RunSummaryEventArgs(deck, draftClass, arenaInfo.IsUnderground,
+						arenaInfo.Wins, arenaInfo.Losses));
+			}
+
+			_wasDrafting = true; // leaving this screen fires OnDraftEnded, which hides the panel
+			return true;
 		}
 
 		private void HandleDeckEdit(ArenaInfo arenaInfo)

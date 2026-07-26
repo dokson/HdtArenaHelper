@@ -5,9 +5,7 @@
 [![build](https://github.com/dokson/HdtArenaHelper/actions/workflows/build.yml/badge.svg)](https://github.com/dokson/HdtArenaHelper/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/dokson/HdtArenaHelper?sort=semver)](https://github.com/dokson/HdtArenaHelper/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Hearthstone Deck Tracker](https://img.shields.io/badge/plugin%20for-Hearthstone%20Deck%20Tracker-2c7ce6)](https://hsdecktracker.net/)
-
-[![data: HSReplay](https://img.shields.io/badge/data-HSReplay-1d9bf0)](https://hsreplay.net/)
+[![Hearthstone Deck Tracker](https://img.shields.io/badge/plugin%20for-Hearthstone%20Deck%20Tracker-2c7ce6)](https://hsreplay.net/)
 
 **A free, open-source Hearthstone Arena draft helper — a plugin for
 [Hearthstone Deck Tracker](https://hsdecktracker.net/) (HDT).**
@@ -34,6 +32,10 @@ the plaque.*
 ![The overlay scoring an Underground Arena legendary-group pick](docs/screenshot.png)
 *Underground Arena's legendary group, scored as the package it is rather than card by card —
 and tilted toward the bomb, because this pick is the run's only guaranteed legendary.*
+
+![The redraft deck review, ranking every card with the weakest flagged to cut](docs/screenshot-redraft.png)
+*The post-loss redraft: the whole deck scored and ordered, with the weakest cards flagged so the
+five to discard are obvious. It ranks the deck as it stands — cut a card and the row goes.*
 
 ## Why this plugin
 
@@ -104,6 +106,15 @@ free, transparent, and honest about its limits.
   all, which is the honest answer and keeps the one that matters visible — and a card nobody has
   enough games on gets silence rather than a guess, because a thinly-measured legendary looks
   average for want of data, not for want of power.
+- **Tells you what your deck DOES, on the run screen** — the one between matches: the minion curve,
+  how much hard removal against how much damage, AoE, card draw. Counts only, no verdict: you can check
+  every one of them against your own deck, which is why it needs no data to be honest.
+- **Reads the opponent's HERO POWER at the mulligan**, because a small body dying "for free" is a
+  claim about *their* side of the trade. Derived from the hero power CARD rather than the class — an
+  Arena hero can be dual-class, and the hero power is what actually kills your minion — only two of
+  the eleven basic hero powers answer a one-health body for nothing. Against the classes that must
+  swing the hero and take the damage back, the same 2/1 becomes a keep. When the hero power cannot be
+  read, the advice stays what it was: a rule is never relaxed on missing data.
 - **Stays out of your other games** — the in-game overlay appears only in an actual Arena match,
   so Battlegrounds, ranked and brawls are untouched.
 - **Self-updating** — checks this repo's public releases once a day and stages the new build for
@@ -202,16 +213,10 @@ than scored. What is open now:
 - [ ] **Judgement calls that go beyond the rules** ("I am behind, I want removal"). Bounded and
       experimental if it ever lands — there is no public per-game dataset to fit it against, and
       this project's own measurements say an unvalidated number is worse than no number.
-- [ ] **The opponent's class at the mulligan.** Some calls genuinely depend on it — a one-health
-      body is free removal for a pinging hero power and fine against the classes without one — and
-      the client knows the matchup before you keep a card.
 - [ ] **Your run, scored as a whole** — the average score of the deck you have drafted, and the same
       for your opponent's deck reconstructed from the cards they actually play. It is the one number
       that says how the *run* is going rather than what to pick next, and everything it needs is
       already on this machine.
-- [ ] **A mechanics summary of your deck** — drop curve, removal, AoE, card draw. The synergy engine
-      already computes most of this to decide its bonus and then throws it away; showing it costs no
-      new data at all.
 - [ ] **Your own numbers** — win-rate by class, by hero and by period, from the game history HDT
       already keeps locally. Nobody else's data, nobody's permission required.
 - [ ] **A second win-rate source, if one can be had honourably.** Consensus survives one provider
@@ -240,6 +245,7 @@ vulnerability.
 | Source | What it provides |
 |---|---|
 | [HSReplay](https://hsreplay.net/) arena API | Real arena win-rate / popularity per card and class (free, public) |
+| [HearthDb](https://github.com/HearthSim/HearthDb) (ships with HDT) | Card metadata — costs, statlines, tribes, keywords, text |
 
 The feed is scoped to **Underground Arena** and to recent games (a 4-day window, stated in the
 payload itself). So no pre-patch games dilute a score — and if you play normal Arena, the numbers
@@ -253,7 +259,19 @@ individually droppable, with the offline model as the backstop.
 
 ## License
 
-[MIT](./LICENSE).
+[MIT](./LICENSE) — for this project's own code.
+
+It does not cover the Hearthstone card data. The repository also carries a generated copy of the
+card list (`docs/CardDatabase.md` and `Generated/CardDatabase.g.cs`) so that contributors can check
+a rule against the whole pool without a Hearthstone install. That data comes from HearthDb, whose
+**code** is MIT but whose **cards** are extracted from Blizzard's client and carry no licence of
+their own: they are Blizzard's, reproduced here as non-commercial fan content under Blizzard's
+[Fan Content Policy](https://www.blizzard.com/en-us/legal/fan-content-policy). Neither file is part
+of the plugin — it reads the same data from HDT at runtime — and neither is an official or
+authoritative card database.
+
+Hearthstone is a trademark of Blizzard Entertainment, Inc. This project is not affiliated with or
+endorsed by Blizzard Entertainment or by the Hearthstone Deck Tracker authors.
 
 ---
 
