@@ -6,28 +6,35 @@ using Xunit;
 namespace HdtArenaHelper.Tests
 {
 	/// <summary>
-	/// Checks that <c>docs/CardDatabase.md</c> and <c>Generated/CardDatabase.g.cs</c> still match
-	/// what <see cref="CardPoolDump.Build"/> produces from the HearthDb this project already
+	/// Checks that <c>docs/HSDatabase.md</c> and <c>Generated/HSDatabase.g.cs</c> still match
+	/// what <see cref="HSDatabaseGenerator.Build"/> produces from the HearthDb this project already
 	/// references — i.e. that nobody forgot to re-run
-	/// <c>dotnet run --project HdtArenaHelper.Training -- --dump-cards</c> after a HearthDb bump,
+	/// <c>dotnet run --project HdtArenaHelper.Training -- --dump-database</c> after a HearthDb bump,
 	/// and that <c>card-database.yml</c> is actually keeping the committed files current. Compares
-	/// against <see cref="CardPoolDump.Build"/>'s own output rather than a second, hand-written
-	/// projection: a reimplementation here is exactly the mistake that let a regression test pass
-	/// either way in 0.1.6 (see AGENTS.md's synergy-engine section).
+	/// against <see cref="HSDatabaseGenerator.Build"/>'s own output rather than a second,
+	/// hand-written projection: a reimplementation here is exactly the mistake that let a regression
+	/// test pass either way in 0.1.6 (see AGENTS.md's synergy-engine section).
 	/// </summary>
-	public class CardPoolDumpDriftTests
+	public class HSDatabaseDriftTests
 	{
 		[Fact]
 		public void Committed_files_match_the_live_HearthDb_projection()
 		{
 			var repoRoot = FindRepoRoot();
-			var (markdown, csSource, _, _, _) = CardPoolDump.Build();
+			var (files, _, _, _) = HSDatabaseGenerator.Build();
 
-			var committedMd = File.ReadAllText(Path.Combine(repoRoot, "docs", "CardDatabase.md"));
-			var committedCs = File.ReadAllText(Path.Combine(repoRoot, "Generated", "CardDatabase.g.cs"));
+			// Iterating whatever the generator says it writes, rather than naming the files here: a
+			// list this test does not know about is a file nothing checks, which is the exact failure
+			// the whole drift test exists to prevent.
+			Assert.NotEmpty(files);
+			foreach(var file in files)
+			{
+				var path = Path.Combine(repoRoot, file.Path.Replace('/', Path.DirectorySeparatorChar));
+				Assert.True(File.Exists(path), $"{file.Path} is missing — re-run `--dump-database`.");
 
-			Assert.True(markdown == committedMd, Stale("docs/CardDatabase.md", markdown, committedMd));
-			Assert.True(csSource == committedCs, Stale("Generated/CardDatabase.g.cs", csSource, committedCs));
+				var committed = File.ReadAllText(path);
+				Assert.True(file.Content == committed, Stale(file.Path, file.Content, committed));
+			}
 		}
 
 		/// <summary>
@@ -52,7 +59,7 @@ namespace HdtArenaHelper.Tests
 				}
 			}
 
-			return $"{file} is stale — re-run `dotnet run --project HdtArenaHelper.Training -- --dump-cards`."
+			return $"{file} is stale — re-run `dotnet run --project HdtArenaHelper.Training -- --dump-database`."
 				+ $"{Environment.NewLine}{where}";
 		}
 

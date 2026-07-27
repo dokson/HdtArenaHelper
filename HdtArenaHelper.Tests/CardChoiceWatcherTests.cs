@@ -28,9 +28,9 @@ namespace HdtArenaHelper.Tests
 			=> cards.Select(c => c.CardId).ToArray();
 
 		// A Priest hero and a two-card deck: enough to be a valid arena run.
-		private static readonly string PriestHero = HSCard.AnduinWrynn.CardId;
+		private static readonly string PriestHero = HSHero.AnduinWrynn.CardId;
 		// A real Priest hero power: the dual-class path reads the class off this when Hero is empty.
-		private static readonly string PriestHeroPower = HSCard.HolyTouch.CardId;
+		private static readonly string PriestHeroPower = HSHeroPower.HolyTouch.CardId;
 
 		[Fact]
 		public void No_offered_cards_means_nothing_to_show()
@@ -113,6 +113,76 @@ namespace HdtArenaHelper.Tests
 
 			Assert.Equal(3, plan!.Args.DeckDbfIds.Count);
 			Assert.Equal(2, plan.Args.DeckDbfIds.Count(id => id == Dbf(Raptor)));
+		}
+
+		// ---- the dedup/debounce gate ------------------------------------------------
+		//
+		// Measured on a live session before this existed: 8 of 35 in-game choices were exact repeats
+		// of the trio before them, four within 6-12 seconds. The client drops IsVisible for a moment
+		// mid-choice, and clearing on the first empty poll threw away the dedup key, so the same
+		// Discover was announced again. None of that is visible from outside — the overlay just
+		// reappears — which is why the state machine is separate and tested here.
+
+		private static CardChoiceWatcher.ChoiceGate Gate()
+			=> new CardChoiceWatcher.ChoiceGate(CardChoiceWatcher.PollsBeforeGone);
+
+		[Fact]
+		public void A_new_choice_is_announced_once()
+		{
+			var gate = Gate();
+
+			Assert.True(gate.Announce("1,2,3"));
+			Assert.False(gate.Announce("1,2,3"));
+			Assert.False(gate.Announce("1,2,3"));
+		}
+
+		[Fact]
+		public void A_flicker_does_not_re_announce_the_same_choice()
+		{
+			// The bug this exists for. One empty poll must not end the choice, or the very next poll
+			// sees the same cards as new and the overlay fires again seconds later.
+			var gate = Gate();
+			gate.Announce("1,2,3");
+
+			Assert.False(gate.Miss());                 // one empty poll: not gone
+			Assert.False(gate.Announce("1,2,3"));      // and the dedup key survived it
+		}
+
+		[Fact]
+		public void A_lasting_absence_ends_the_choice()
+		{
+			var gate = Gate();
+			gate.Announce("1,2,3");
+
+			for(var i = 1; i < CardChoiceWatcher.PollsBeforeGone; i++)
+				Assert.False(gate.Miss());
+
+			Assert.True(gate.Miss());                  // the threshold poll: gone, once
+			Assert.False(gate.Miss());                 // and not again while nothing is showing
+		}
+
+		[Fact]
+		public void After_a_choice_ends_the_SAME_cards_are_a_new_choice()
+		{
+			// The other direction, and the reason the debounce is a threshold rather than a mute:
+			// a Discover really can offer the same three cards later, and once the first is over the
+			// second must be announced.
+			var gate = Gate();
+			gate.Announce("1,2,3");
+			for(var i = 0; i < CardChoiceWatcher.PollsBeforeGone; i++)
+				gate.Miss();
+
+			Assert.True(gate.Announce("1,2,3"));
+		}
+
+		[Fact]
+		public void A_different_choice_is_announced_even_without_an_empty_poll()
+		{
+			// The client can swap one choice straight into another (a Discover that discovers again).
+			var gate = Gate();
+			gate.Announce("1,2,3");
+
+			Assert.True(gate.Announce("4,5,6"));
 		}
 	}
 }

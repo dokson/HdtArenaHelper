@@ -39,8 +39,11 @@ namespace HdtArenaHelper.Tests
 
 		// A 4-mana body used as filler.
 		private static readonly CardEntry TwoDropBody = HSCard.ChillwindYeti;
-		// 2 mana 3/2: on curve AND able to trade. A 1-attack body is deliberately not a "cheap play"
-		// any more (see MinContestingAttack), so a 1/1 would test the wrong thing.
+		// 2 mana 3/2: on curve AND able to trade, so it exercises the keep rules with nothing else
+		// interfering. This comment used to claim a 1-attack body was excluded by a
+		// `MinContestingAttack` rule — no such rule exists anywhere in the source, and a 1/1 IS
+		// treated as a cheap play today. Left as a note rather than deleted, because a comment
+		// describing a rule that is not there is how the wrong fixture goes unnoticed.
 		private static readonly CardEntry CheapBody = HSCard.BloodfenRaptor;
 		// Vanilla on purpose: a 3-drop whose text could trip the removal rule would pass the coin
 		// test for the wrong reason (Ironforge Rifleman's "Deal 1 damage" did exactly that).
@@ -243,9 +246,9 @@ namespace HdtArenaHelper.Tests
 			var deck = DeckOf((CheapBody, 30));
 
 			var vsMage = Advisor.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false,
-				HeroPower(HSCard.Fireblast));
+				HeroPower(HSHeroPower.Fireblast));
 			var vsWarrior = Advisor.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false,
-				HeroPower(HSCard.ArmorUp));
+				HeroPower(HSHeroPower.ArmorUp));
 
 			Assert.NotEqual(MulliganVerdict.Keep, vsMage[0].Verdict);
 			Assert.Equal(MulliganVerdict.Keep, vsWarrior[0].Verdict);
@@ -259,7 +262,7 @@ namespace HdtArenaHelper.Tests
 			// into it and eating its attack — the distinction that makes a 3/1 and a 2/1 different
 			// cards to hold. Demon Claws is the hero power read from a real match while building this.
 			var verdicts = Advisor.Evaluate(new[] { Dbf(FragileTwoDrop) }, DeckOf((CheapBody, 30)),
-				CardClass.PALADIN, onCoin: false, HeroPower(HSCard.DemonClaws));
+				CardClass.PALADIN, onCoin: false, HeroPower(HSHeroPower.DemonClaws));
 
 			Assert.Equal(MulliganVerdict.Keep, verdicts[0].Verdict);
 		}
@@ -348,6 +351,129 @@ namespace HdtArenaHelper.Tests
 
 			Assert.Equal(MulliganVerdict.Keep, cheap[0].Verdict);
 			Assert.NotEqual(MulliganVerdict.Keep, pricey[0].Verdict);
+		}
+
+		[Fact]
+		public void A_top_end_card_that_UPGRADES_WHILE_HELD_is_not_simply_too_slow()
+		{
+			// Same shape as the trade-upside rule: holding it IS the plan, so the printed cost is not
+			// the whole story. Infuse says it as a keyword; 13 Infuse cards cost 5 or more, which is
+			// the only place this can fire. A score is set so the control is the top-end rule firing
+			// rather than abstaining for want of data.
+			var advisor = new DeckMulliganAdvisor();
+			advisor.SetScoreSource(_ => 40.0);
+			var deck = DeckOf((CheapBody, 30));
+
+			var infused = advisor.Evaluate(new[] { Dbf(HSCard.StonebornAccuser) }, deck,
+				CardClass.DEATHKNIGHT, onCoin: false);
+			var plain = advisor.Evaluate(new[] { Dbf(BigBody) }, deck, CardClass.PALADIN, onCoin: false);
+
+			Assert.NotEqual(MulliganVerdict.Toss, infused[0].Verdict);
+			Assert.Contains("hold", infused[0].Reason ?? "");
+			Assert.Equal(MulliganVerdict.Toss, plain[0].Verdict);
+		}
+
+		[Fact]
+		public void A_card_that_upgrades_in_hand_OR_DECK_is_no_reason_to_hold_it()
+		{
+			// The veto, and the distinction the rule turns on. Lotus Troublemaker's counter ticks
+			// "while in hand or deck", so keeping it buys nothing — it is written precisely so you do
+			// not have to. Pinned at the text level because the two families read almost identically.
+			Assert.True(DeckMulliganAdvisor.UpgradesWhileHeld("taunt infuse (3): gain +2/+2."));
+			Assert.True(DeckMulliganAdvisor.UpgradesWhileHeld(
+				"whenever a friendly minion dies while this is in your hand, gain +1/+1."));
+			// The tooltip-wrap case, which is why the pattern uses \s+.
+			Assert.True(DeckMulliganAdvisor.UpgradesWhileHeld("costs (1) less while this is\nin your hand."));
+
+			Assert.False(DeckMulliganAdvisor.UpgradesWhileHeld(
+				"shoot 1 time! (while in hand or deck play cards for 2 mana to shoot more!)"));
+			Assert.False(DeckMulliganAdvisor.UpgradesWhileHeld("deal 3 damage to a minion."));
+		}
+
+		[Fact]
+		public void A_cheap_spell_that_SUMMONS_is_an_early_play_like_a_body()
+		{
+			// Seen live: Mining Casualties ("Summon two 1/1 Silver Hand Recruits...") got no verdict
+			// at all, because the early-keep rule asked what the card IS — minion, weapon, location —
+			// rather than what it does on turn two. Two 1/1s on turn two is a two-drop however the
+			// card is typed. The rule against cheap spells still stands for the cards it was written
+			// for: removal and reach answer a board that does not exist yet.
+			var deck = DeckOf((CheapBody, 30));
+			var summons = Advisor.Evaluate(new[] { Dbf(HSCard.MiningCasualties) }, deck,
+				CardClass.DEATHKNIGHT, onCoin: false);
+			var removal = Advisor.Evaluate(new[] { Dbf(HSCard.ArcaneMissiles) }, deck,
+				CardClass.MAGE, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Keep, summons[0].Verdict);
+			Assert.NotEqual(MulliganVerdict.Keep, removal[0].Verdict);
+		}
+
+		[Fact]
+		public void The_summon_rule_reads_only_what_THIS_card_does()
+		{
+			// Two guards, both found by running the rule over the pool rather than by reasoning.
+			// Quoted text belongs to the TOKEN: Mining Casualties' recruits carry a Deathrattle, and
+			// reading it as the spell's own condition rejected the card the rule exists for.
+			Assert.True(DeckMulliganAdvisor.DevelopsBoard(
+				"summon two 1/1 silver hand recruits with \"deathrattle: summon a 1/1 frail ghoul\"."));
+			// A summon that waits for a trigger is not a turn-two play.
+			Assert.False(DeckMulliganAdvisor.DevelopsBoard(
+				"deathrattle: summon two 1/1 recruits."));
+			// Nor is the opponent's.
+			Assert.False(DeckMulliganAdvisor.DevelopsBoard("your opponent summons a 2/2."));
+			// A quest's text states what you must DO, and reads exactly like a summon — Jungle Giants,
+			// Unite the Murlocs and Unseal the Vault all matched until the QUEST tag was checked at
+			// the call site, which is why that guard is a tag and not a word.
+		}
+
+		[Fact]
+		public void A_card_paid_for_in_HEALTH_gets_no_verdict()
+		{
+			// Blood Draw reads 3 mana and is castable on turn 1 for three life, so every tempo rule
+			// here — all of them built on the printed cost — would be answering the wrong question.
+			// The same abstention hero cards get, for the same reason. Silence rather than a guess:
+			// weighing life against tempo needs data this advisor does not have.
+			var verdicts = Advisor.Evaluate(new[] { Dbf(HSCard.BloodDraw) },
+				DeckOf((CheapBody, 30)), CardClass.DEATHKNIGHT, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Situational, verdicts[0].Verdict);
+			Assert.Null(verdicts[0].Reason);
+
+			// Pinned at the text level too, so the wording is the rule rather than one card.
+			Assert.True(DeckMulliganAdvisor.PaysWithHealth(
+				"discover a spell. this costs health instead of mana."));
+			// The tooltip-wrap case, which is why the pattern uses \s+.
+			Assert.True(DeckMulliganAdvisor.PaysWithHealth("this costs health\ninstead of mana."));
+			Assert.False(DeckMulliganAdvisor.PaysWithHealth("deal 3 damage to your hero. draw a card."));
+		}
+
+		[Fact]
+		public void A_cheap_body_that_needs_a_WEAPON_is_not_a_turn_one_play()
+		{
+			// Seen live: Air Guitarist ("Battlecry: Give your weapon +1 Durability") came back as a
+			// plain turn-1 keep. It is a 1/1 whose text does nothing until a weapon exists, and on
+			// turn 1 none can — you cannot equip before your first turn, which makes this stricter
+			// than the friendly-board case it sits beside. The dependency list named only minion
+			// things, so "your weapon" fell straight through it.
+			var verdicts = Advisor.Evaluate(new[] { Dbf(HSCard.AirGuitarist) },
+				DeckOf((CheapBody, 30)), CardClass.ROGUE, onCoin: false);
+
+			Assert.NotEqual(MulliganVerdict.Keep, verdicts[0].Verdict);
+			Assert.Contains("weapon", verdicts[0].Reason ?? "");
+		}
+
+		[Fact]
+		public void A_cheap_body_that_EQUIPS_its_own_weapon_still_plays_on_turn_one()
+		{
+			// The veto, and the trap it exists for: a card that supplies its own dependency does not
+			// depend on you for it — the same lesson the synergy engine's generation veto is built
+			// on. No card at this cost does both today, so this pins the rule rather than a card.
+			Assert.False(DeckMulliganAdvisor.DependsOnAnEquippedWeapon(
+				"battlecry: equip a 1/3 weapon. give your weapon +1 attack."));
+			Assert.True(DeckMulliganAdvisor.DependsOnAnEquippedWeapon(
+				"battlecry: give your weapon +1 durability."));
+			// The tooltip-line-break case, which is why the pattern uses \s+ and not a space.
+			Assert.True(DeckMulliganAdvisor.DependsOnAnEquippedWeapon("give your\nweapon +2 attack."));
 		}
 
 		[Fact]

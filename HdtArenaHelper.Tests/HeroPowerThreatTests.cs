@@ -36,13 +36,13 @@ namespace HdtArenaHelper.Tests
 		{
 			// Fireblast: "Deal $1 damage". The cheapest answer in the game and the reason the
 			// one-health rule exists at all.
-			Assert.Equal(HeroPowerAnswer.DirectDamage, HeroPowerThreat.Classify(Hp(HSCard.Fireblast)).Answer);
-			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSCard.Fireblast), 1));
+			Assert.Equal(HeroPowerAnswer.DirectDamage, HeroPowerThreat.Classify(Hp(HSHeroPower.Fireblast)).Answer);
+			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.Fireblast), 1));
 			// ...but only as far as its damage reaches: a 2-health body survives Fireblast.
-			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSCard.Fireblast), 2));
+			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.Fireblast), 2));
 			// The upgraded version reaches further, which is why the AMOUNT is read and not just the
 			// presence of damage.
-			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSCard.FireblastRank2), 2));
+			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.FireblastRank2), 2));
 		}
 
 		[Fact]
@@ -54,7 +54,7 @@ namespace HdtArenaHelper.Tests
 			// among the classes that ping a minion, which would have told a player to mulligan a 2/1
 			// that was actually safe. Reconciled by the repeated "Hero Power" label, which is how
 			// HearthDb marks two renderings of one card.
-			foreach(var power in new[] { HSCard.SteadyShot, HSCard.BallistaShot })
+			foreach(var power in new[] { HSHeroPower.SteadyShot, HSHeroPower.BallistaShot })
 			{
 				Assert.Equal(HeroPowerAnswer.None, HeroPowerThreat.Classify(Hp(power)).Answer);
 				Assert.False(HeroPowerThreat.KillsForFree(Hp(power), 1));
@@ -72,7 +72,7 @@ namespace HdtArenaHelper.Tests
 			// Named through the generated pool, which also made this case DETERMINISTIC: two cards are
 			// called "Spread Shot" (Uldum's hero power and a duels one), and the name lookup this
 			// replaced took whichever HearthDb enumerated first.
-			var spreadShot = Hp(HSCard.SpreadShot);
+			var spreadShot = Hp(HSHeroPower.SpreadShot);
 			Assert.Equal(HeroPowerAnswer.DirectDamage, HeroPowerThreat.Classify(spreadShot).Answer);
 			Assert.True(HeroPowerThreat.KillsForFree(spreadShot, 1));
 		}
@@ -84,10 +84,10 @@ namespace HdtArenaHelper.Tests
 			// it trades the turn it arrives — and it dies at end of turn anyway, so the trade is free.
 			// Paladin's Silver Hand Recruit has no Charge: it cannot attack until next turn, so it is
 			// not an answer to the body sitting in front of it now.
-			Assert.Equal(HeroPowerAnswer.ChargeToken, HeroPowerThreat.Classify(Hp(HSCard.GhoulCharge)).Answer);
-			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSCard.GhoulCharge), 1));
-			Assert.Equal(HeroPowerAnswer.None, HeroPowerThreat.Classify(Hp(HSCard.Reinforce)).Answer);
-			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSCard.Reinforce), 1));
+			Assert.Equal(HeroPowerAnswer.ChargeToken, HeroPowerThreat.Classify(Hp(HSHeroPower.GhoulCharge)).Answer);
+			Assert.True(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.GhoulCharge), 1));
+			Assert.Equal(HeroPowerAnswer.None, HeroPowerThreat.Classify(Hp(HSHeroPower.Reinforce)).Answer);
+			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.Reinforce), 1));
 		}
 
 		[Fact]
@@ -97,7 +97,7 @@ namespace HdtArenaHelper.Tests
 			// into a body costs them its attack in face damage. So these classify as HeroAttack and
 			// report ZERO free damage — the removal exists, it just is not free.
 			// Druid, Demon Hunter, Rogue.
-			foreach(var power in new[] { HSCard.Shapeshift, HSCard.DemonClaws, HSCard.DaggerMastery })
+			foreach(var power in new[] { HSHeroPower.Shapeshift, HSHeroPower.DemonClaws, HSHeroPower.DaggerMastery })
 			{
 				Assert.Equal(HeroPowerAnswer.HeroAttack, HeroPowerThreat.Classify(Hp(power)).Answer);
 				Assert.Equal(0, HeroPowerThreat.Classify(Hp(power)).FreeDamage);
@@ -109,7 +109,7 @@ namespace HdtArenaHelper.Tests
 		public void Armour_healing_and_card_draw_answer_nothing()
 		{
 			// Warrior, Priest, Warlock, Shaman.
-			foreach(var power in new[] { HSCard.ArmorUp, HSCard.LesserHeal, HSCard.LifeTap, HSCard.TotemicCall })
+			foreach(var power in new[] { HSHeroPower.ArmorUp, HSHeroPower.LesserHeal, HSHeroPower.LifeTap, HSHeroPower.TotemicCall })
 			{
 				Assert.Equal(HeroPowerAnswer.None, HeroPowerThreat.Classify(Hp(power)).Answer);
 				Assert.False(HeroPowerThreat.KillsForFree(Hp(power), 1));
@@ -121,7 +121,7 @@ namespace HdtArenaHelper.Tests
 		{
 			// Guards the caller: health comes from card data and a zero would otherwise make every
 			// hero power look like an answer.
-			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSCard.Fireblast), 0));
+			Assert.False(HeroPowerThreat.KillsForFree(Hp(HSHeroPower.Fireblast), 0));
 		}
 	}
 }

@@ -67,15 +67,18 @@ hsreplay.net a browser User-Agent alone is NOT enough (Cloudflare fingerprints t
 
 ## The card pool, in the repo
 
-`docs/CardDatabase.md` (to grep) and `Generated/CardDatabase.g.cs` (compiled by the three test
-projects) are a generated copy of every collectible card, hero and hero power. Regenerate them
-whenever HDT is bumped:
+`docs/hearthstone-cards.md`, `docs/hearthstone-hero-powers.md` and `docs/hearthstone-heroes.md` (to
+grep) and `Generated/HSDatabase.g.cs` (compiled by the three test projects) are a generated copy of
+every collectible card, hero and hero power. Regenerate them whenever HDT is bumped:
 
 ```powershell
-dotnet run --project HdtArenaHelper.Training -c Release -- --dump-cards
+dotnet run --project HdtArenaHelper.Training -c Release -- --dump-database
 ```
 
 A test fails if you forget: the committed files are diffed byte-for-byte against the generator.
+
+Cards, hero powers and heroes are kept apart on purpose — `HSCard`, `HSHeroPower`, `HSHero` — because
+"Icy Touch" is both a spell and a hero power, and one shared list gave the name to the wrong one.
 
 Two rules around it. **Test fixtures name their cards** — `HSCard.Tuskpiercer`, never `"BAR_330"`
 with a comment saying which card that is, because the comment is not checked and one of them was

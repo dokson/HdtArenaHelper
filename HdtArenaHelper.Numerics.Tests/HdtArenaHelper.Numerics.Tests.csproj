@@ -37,7 +37,7 @@
     MATCHES HearthDb is a different question, asked by the drift test in HdtArenaHelper.Tests.
   -->
   <ItemGroup>
-    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
+    <Compile Include="..\Generated\HSDatabase.g.cs" Link="Generated\HSDatabase.g.cs" />
   </ItemGroup>
 
 </Project>

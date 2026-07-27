@@ -5,6 +5,65 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **A card, a hero power and a hero are three different kinds of thing, and now three different
+  databases.** They shared one list and one set of named accessors, where the bare name went to
+  whichever printing had the lowest dbf id — so `HSCard.IcyTouch` was the Mage HERO POWER rather than
+  the Death Knight Frost spell of the same name, and a measurement written against it silently read
+  the wrong card. Split into `CardDatabase`/`HSCard`, `HeroPowerDatabase`/`HSHeroPower` and
+  `HeroDatabase`/`HSHero`: a name now only has to be unique among things of its own kind, and nothing
+  that takes a card can be handed a hero power.
+  The files follow: `Generated/HSDatabase.g.cs` (one compile unit, three databases) and three
+  markdown files named like the rest of `docs/` — `hearthstone-cards.md`,
+  `hearthstone-hero-powers.md`, `hearthstone-heroes.md`. The generator is `HSDatabaseGenerator` and
+  its flag is `--dump-database`. It returns a LIST of files it writes, and the drift test iterates
+  that list rather than naming the files itself, so a file nothing checks cannot be added by accident.
+
+### Fixed
+
+- **A card that UPGRADES while you hold it is no longer simply "too slow".** Infuse states it as a
+  keyword ("Infuse (3): Gain +2/+2") and a handful of older cards say it longhand ("Whenever a
+  friendly minion dies while this is in your hand, gain +1/+1"): for those, holding the card IS the
+  plan, which is the same reason the trade-upside rule exists. 29 Infuse cards in the pool, 13 at
+  cost 5 or more — the only place the top-end rule can fire. Situational, never Keep: whether the
+  enablers happen is exactly the judgement no data here can settle.
+  The veto is the whole distinction: **"in hand or deck" is not a reason to hold anything.** Lotus
+  Troublemaker's counter ticks whether you keep it or not, so it stays an ordinary top-end card — it
+  is written precisely so you do not have to hold it.
+- **The run panel said "thin at 5-drop" beside a curve row showing `5:3`.** The thinnest slot was
+  computed over MINIONS against a minions target while the row above it counts all 30 cards, so the
+  two contradicted each other a line apart — the same deck had 6:1 and 1:2 sitting visibly thinner.
+  Removed from the panel: a statistic a reader cannot reconcile with the numbers beside it is worse
+  than none, and the curve row already shows where the deck is short. The log keeps it, labelled
+  "thinnest body slot" next to the bodies curve, where it is coherent.
+- **The run panel labels its mean.** "midrange (3.5)" now reads "midrange (avg cost 3.5)": a bare
+  number beside a word does not say what it counts.
+- **A cheap spell that SUMMONS is now an early play, like the body it puts down.** Mining Casualties
+  ("Summon two 1/1 Silver Hand Recruits…") got no verdict at all: the early-keep rule asked what a
+  card IS — minion, weapon, location — and a spell failed the test however much board it made. The
+  rule against cheap spells stands for the cards it was written for, removal and reach, which answer
+  a board that does not exist yet. Two guards, both found by running the rule over the pool rather
+  than by reasoning about it: QUOTED text belongs to the token, not the card (Mining Casualties' own
+  recruits carry a Deathrattle, and reading it as the spell's condition rejected the card the rule
+  exists for), and a quest is excluded by its TAG, because a quest's text states what you must DO
+  and reads exactly like a summon — Jungle Giants, Unite the Murlocs and Unseal the Vault all
+  matched until then. 117 cheap spells qualify.
+- **A cheap minion whose text needs a WEAPON is no longer a turn-1 keep.** Air Guitarist
+  ("Battlecry: Give your weapon +1 Durability") is a 1/1 whose text does nothing until a weapon
+  exists, and on turn 1 none can — nothing is equipped before your first turn, which makes this
+  stricter than the friendly-board rule it sits beside. The dependency list named only minion things
+  ("your minions", "your beasts", …), so "your weapon" fell straight through it. Vetoed for a card
+  that equips one itself, the same shape as the synergy engine's generation veto. Measured through
+  the rule, not by grepping the pool: 15 collectible cards at cost 2 or less, mostly Rogue's poisons
+  — a grep said 20 because it counted hero powers the rule never sees.
+- **A test comment described a rule that does not exist.** It claimed a 1-attack body was excluded
+  from the cheap-play keeps by a `MinContestingAttack` constant; there is no such constant anywhere
+  in the source, and a 1/1 is treated as a cheap play today. Corrected in place rather than deleted,
+  because that comment is how a fixture goes on looking justified.
+
 ## [0.1.6] - 2026-07-27
 
 ### Added

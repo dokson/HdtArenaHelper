@@ -22,8 +22,8 @@ namespace HdtArenaHelper.Tests
 		private static readonly CardEntry Ogre = HSCard.BoulderfistOgre;
 		// The watcher takes the hero and hero power as the client reports them — card ids — so these
 		// stay strings, named through the pool instead of typed out.
-		private static readonly string PriestHero = HSCard.AnduinWrynn.CardId;
-		private static readonly string PriestHeroPower = HSCard.HolyTouch.CardId;
+		private static readonly string PriestHero = HSHero.AnduinWrynn.CardId;
+		private static readonly string PriestHeroPower = HSHeroPower.HolyTouch.CardId;
 
 		// The watcher is handed CARD IDS by the client, so a fixture has to produce them. It takes
 		// them from the named pool rather than as literals: the id is the client's currency, the name

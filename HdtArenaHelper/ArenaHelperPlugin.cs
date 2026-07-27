@@ -907,7 +907,15 @@ namespace HdtArenaHelper
 				// on a normalized scale is not interpretable, "53%" is. Estimate, so labelled.
 				var note = isHeroPick ? ClassWinRateNote(option.CardId) : null;
 				entries.Add(new OverlayEntry(label, score, cost: -1, note: note));
-				Log.Info($"[ArenaHelper] option {option.CardId} dbf={option.DbfId} pkg={option.PackageDbfIds.Count} " +
+				// The package cards are NAMED, not just counted. A legendary group's score is the
+				// package's, so "pkg=3" alone cannot be checked against the screen — and the client
+				// shows two different lists beside these cards, the ones that go into the deck and
+				// the SIDEBOARD ones a card like King of the Underbelly discovers from. Which of the
+				// two HearthMirror hands us is a question the log has to be able to answer.
+				var pkg = option.PackageDbfIds.Count == 0
+					? ""
+					: " pkg=[" + string.Join(", ", option.PackageDbfIds.Select(ResolveNameByDbf)) + "]";
+				Log.Info($"[ArenaHelper] option {option.CardId} dbf={option.DbfId} pkg={option.PackageDbfIds.Count}{pkg} " +
 					$"label='{label}' score={(score.HasData ? Math.Round(score.Value).ToString() : "-")} " +
 					DescribeScore(score));
 			}
@@ -1060,6 +1068,20 @@ namespace HdtArenaHelper
 				Log.Error("[ArenaHelper] hero class lookup failed: " + ex);
 			}
 			return ResolveName(cardId);
+		}
+
+		/// <summary>A dbf id's card name, for diagnostics only — never for a decision.</summary>
+		private static string ResolveNameByDbf(int dbfId)
+		{
+			try
+			{
+				var card = HearthDb.Cards.All.Values.FirstOrDefault(c => c.DbfId == dbfId);
+				return card == null ? dbfId.ToString() : $"{card.Name} ({card.Cost})";
+			}
+			catch
+			{
+				return dbfId.ToString();
+			}
 		}
 
 		private static string ResolveName(string cardId)

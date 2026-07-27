@@ -11,13 +11,14 @@ namespace HdtArenaHelper.Training
 {
 	/// <summary>
 	/// Dumps every COLLECTIBLE card HearthDb knows about, grouped by <see cref="CardSet"/>,
-	/// into two repo-committed reference files: <c>docs/CardDatabase.md</c> to grep and
-	/// <c>Generated/CardDatabase.g.cs</c> for the test projects to compile.
+	/// into two repo-committed reference files: <c>docs/HSDatabase.md</c> to grep and
+	/// <c>Generated/HSDatabase.g.cs</c> for the test projects to compile. Named for what they
+	/// hold — three databases, cards and hero powers and heroes — rather than for cards alone.
 	/// Not part of the ridge fit and NOT part of the plugin build — the plugin reads HearthDb
 	/// directly, so nothing here can change a score or the shipped DLL's size.
 	/// Re-run by CI (<c>card-database.yml</c>) so it never drifts from the pinned HDT version.
 	/// </summary>
-	internal static class CardPoolDump
+	internal static class HSDatabaseGenerator
 	{
 		// Every output line is written with an explicit LF: the repo is LF-only (.gitattributes
 		// normalizes and the pre-commit hook blocks CRLF), and AppendLine would emit
@@ -53,26 +54,44 @@ namespace HdtArenaHelper.Training
 
 		internal static void Run(string repoRoot)
 		{
-			var (markdown, csSource, totalCards, sets, version) = Build();
+			var (files, totalCards, sets, version) = Build();
 
-			var mdPath = Path.Combine(repoRoot, "docs", "CardDatabase.md");
-			File.WriteAllText(mdPath, markdown);
-			Console.WriteLine($"wrote {mdPath} ({totalCards} cards, {sets} sets, HearthDb {version})");
+			Directory.CreateDirectory(Path.Combine(repoRoot, "Generated"));
+			foreach(var file in files)
+			{
+				var path = Path.Combine(repoRoot, file.Path.Replace('/', Path.DirectorySeparatorChar));
+				File.WriteAllText(path, file.Content);
+				Console.WriteLine($"wrote {path} ({file.Entries} entries)");
+			}
 
-			var generatedDir = Path.Combine(repoRoot, "Generated");
-			Directory.CreateDirectory(generatedDir);
-			var csPath = Path.Combine(generatedDir, "CardDatabase.g.cs");
-			File.WriteAllText(csPath, csSource);
-			Console.WriteLine($"wrote {csPath} ({totalCards} entries)");
+			Console.WriteLine($"{totalCards} cards, {sets} sets, HearthDb {version}");
+		}
+
+		/// <summary>One generated file: its repo-relative path and exactly what should be in it.</summary>
+		internal sealed class GeneratedFile
+		{
+			public string Path { get; }
+			public string Content { get; }
+			public int Entries { get; }
+
+			public GeneratedFile(string path, string content, int entries)
+			{
+				Path = path;
+				Content = content;
+				Entries = entries;
+			}
 		}
 
 		/// <summary>
-		/// The exact contents both committed files should have for the current HearthDb. Exposed so
+		/// The exact contents every committed file should have for the current HearthDb. Exposed so
 		/// the drift test can compare against the files byte-for-byte using THIS code rather than a
 		/// second copy of the projection — a re-implementation is the mistake that let a regression
 		/// test pass either way in 0.1.6.
+		///
+		/// A LIST of files rather than a fixed pair: the pool is three databases now, and the drift
+		/// test iterates whatever this returns, so a fourth costs nothing beyond generating it.
 		/// </summary>
-		internal static (string Markdown, string CsSource, int TotalCards, int Sets, string Version) Build()
+		internal static (IReadOnlyList<GeneratedFile> Files, int TotalCards, int Sets, string Version) Build()
 		{
 			// Everything a rule here can be asked about: collectible cards, plus every HERO_POWER and
 			// every HERO. Neither of the last two is COLLECTIBLE — measured, which also means the
@@ -105,27 +124,58 @@ namespace HdtArenaHelper.Training
 			var totalCards = sets.Sum(s => s.Cards.Count);
 			var version = typeof(Cards).Assembly.GetName().Version?.ToString() ?? "unknown";
 
-			return (BuildMarkdown(sets, totalCards, version),
-				BuildCsSource(sets, totalCards, version), totalCards, sets.Count, version);
+			// One markdown file per KIND, mirroring the three C# databases. Reading is the whole
+			// purpose of the markdown, and a reader looking up a hero power should not have to scroll
+			// past 8,000 collectible cards to reach it.
+			var files = new List<GeneratedFile>
+			{
+				// kebab-case to match the rest of docs/ (hearthstone-primer.md, hdt-logo.svg).
+				Markdown(sets, version, "docs/hearthstone-cards.md", "Card database",
+					c => c.Type != CardType.HERO_POWER && c.Type != CardType.HERO),
+				Markdown(sets, version, "docs/hearthstone-hero-powers.md", "Hero power database",
+					c => c.Type == CardType.HERO_POWER),
+				Markdown(sets, version, "docs/hearthstone-heroes.md", "Hero database",
+					c => c.Type == CardType.HERO),
+				new GeneratedFile("Generated/HSDatabase.g.cs",
+					BuildCsSource(sets, totalCards, version), totalCards),
+			};
+
+			return (files, totalCards, sets.Count, version);
+		}
+
+		private static GeneratedFile Markdown(
+			IReadOnlyList<(CardSet Set, IReadOnlyList<Card> Cards)> allSets, string version,
+			string path, string title, Func<Card, bool> keep)
+		{
+			var sets = allSets
+				.Select(s => (s.Set, Cards: (IReadOnlyList<Card>)s.Cards.Where(keep).ToList()))
+				.Where(s => s.Cards.Count > 0)
+				.ToList();
+			var totalCards = sets.Sum(s => s.Cards.Count);
+
+			return new GeneratedFile(path, BuildMarkdown(sets, totalCards, version, title), totalCards);
 		}
 
 		private static string BuildMarkdown(
-			IReadOnlyList<(CardSet Set, IReadOnlyList<Card> Cards)> sets, int totalCards, string version)
+			IReadOnlyList<(CardSet Set, IReadOnlyList<Card> Cards)> sets, int totalCards, string version,
+			string title)
 		{
 			var sb = new StringBuilder();
 			sb.Append($"<!-- {totalCards} cards, {sets.Count} sets, HearthDb {version} -->").Append(Nl);
-			sb.Append("# Card database").Append(Nl).Append(Nl);
-			sb.Append($"Auto-generated by `HdtArenaHelper.Training -- --dump-cards` from **HearthDb {version}**")
+			sb.Append($"# {title}").Append(Nl).Append(Nl);
+			sb.Append($"Auto-generated by `HdtArenaHelper.Training -- --dump-database` from **HearthDb {version}**")
 				.Append(Nl);
 			sb.Append("(the card DB bundled with HDT, pinned by `HDT_VERSION` in the workflows — not by")
 				.Append(Nl);
-			sb.Append("`global.json`, which pins the SDK). Every collectible card plus every hero power, grouped")
+			sb.Append("`global.json`, which pins the SDK), grouped by `CardSet` — do not hand-edit, it is")
 				.Append(Nl);
-			sb.Append("by `CardSet` — do not hand-edit, it is overwritten by `.github/workflows/card-database.yml`.")
+			sb.Append("overwritten by `.github/workflows/card-database.yml`.")
 				.Append(Nl).Append(Nl);
-			sb.Append("The same data is emitted as compilable C# in `Generated/CardDatabase.g.cs`, which the")
+			sb.Append("Cards, hero powers and heroes are three separate files here and three separate")
 				.Append(Nl);
-			sb.Append("test projects compile; a drift test fails if either file stops matching HearthDb.")
+			sb.Append("databases in `Generated/HSDatabase.g.cs`, which the test projects compile; a drift")
+				.Append(Nl);
+			sb.Append("test fails if any of them stops matching HearthDb.")
 				.Append(Nl).Append(Nl);
 
 			foreach(var (set, cards) in sets)
@@ -149,7 +199,7 @@ namespace HdtArenaHelper.Training
 		}
 
 		// Plain data, no HearthDb/HDT reference: any project (even one with no HSDTPath at all)
-		// can add this single file with <Compile Include="..\Generated\CardDatabase.g.cs" />
+		// can add this single file with <Compile Include="..\Generated\HSDatabase.g.cs" />
 		// and get the whole pool as C# — no JSON parsing, no runtime dependency. Deliberately
 		// not referenced by the plugin csproj: it would bloat the shipped DLL for data the
 		// plugin already has from HearthDb at runtime.
@@ -158,7 +208,7 @@ namespace HdtArenaHelper.Training
 		{
 			var sb = new StringBuilder();
 			sb.Append("// <auto-generated>").Append(Nl);
-			sb.Append("// Generated by `dotnet run --project HdtArenaHelper.Training -- --dump-cards`.").Append(Nl);
+			sb.Append("// Generated by `dotnet run --project HdtArenaHelper.Training -- --dump-database`.").Append(Nl);
 			sb.Append($"// Source: HearthDb {version} — {totalCards} collectible cards, {sets.Count} sets.").Append(Nl);
 			sb.Append("// Do not hand-edit — overwritten by .github/workflows/card-database.yml.").Append(Nl);
 			sb.Append("// </auto-generated>").Append(Nl).Append(Nl);
@@ -228,11 +278,37 @@ namespace HdtArenaHelper.Training
 			IReadOnlyList<(CardSet Set, IReadOnlyList<Card> Cards)> sets, int totalCards)
 		{
 			var all = sets.SelectMany(s => s.Cards.Select(c => (Card: c, Set: s.Set))).ToList();
-			var chunks = (all.Count + ChunkSize - 1) / ChunkSize;
 
-			sb.Append("\tpublic static class CardDatabase").Append(Nl);
+			// THREE databases, not one list with three kinds of thing in it. A card, a hero power and
+			// a hero are not interchangeable: nothing that takes a card should ever be handed a hero
+			// power, and "Icy Touch" being both a Death Knight spell and a hero power made that a real
+			// mix-up rather than a theoretical one. Splitting the LISTS as well as the named accessors
+			// means a caller cannot iterate the pool and meet something it has no rule for.
+			WriteDatabase(sb, "CardDatabase", "Every playable collectible card",
+				all.Where(c => c.Card.Type != CardType.HERO_POWER && c.Card.Type != CardType.HERO).ToList());
+			WriteDatabase(sb, "HeroPowerDatabase", "Every hero power",
+				all.Where(c => c.Card.Type == CardType.HERO_POWER).ToList());
+			WriteDatabase(sb, "HeroDatabase", "Every hero",
+				all.Where(c => c.Card.Type == CardType.HERO).ToList());
+
+			// Three classes, not one, for the same reason and with the same split.
+			WriteNamedAccessors(sb, "HSCard", "CardDatabase", "Every playable card in the pool, by name.",
+				all.Where(c => c.Card.Type != CardType.HERO_POWER && c.Card.Type != CardType.HERO).ToList());
+			WriteNamedAccessors(sb, "HSHeroPower", "HeroPowerDatabase", "Every hero power, by name.",
+				all.Where(c => c.Card.Type == CardType.HERO_POWER).ToList());
+			WriteNamedAccessors(sb, "HSHero", "HeroDatabase", "Every hero, by name.",
+				all.Where(c => c.Card.Type == CardType.HERO).ToList());
+		}
+
+		private static void WriteDatabase(StringBuilder sb, string className, string summary,
+			IReadOnlyList<(Card Card, CardSet Set)> all)
+		{
+			var chunks = (all.Count + ChunkSize - 1) / ChunkSize;
+			var totalCards = all.Count;
+
+			sb.Append($"\tpublic static class {className}").Append(Nl);
 			sb.Append("\t{").Append(Nl);
-			sb.Append("\t\t/// <summary>Every collectible card plus every hero power, ordered by set, cost, name, id.</summary>")
+			sb.Append($"\t\t/// <summary>{summary}, ordered by set, cost, name, id.</summary>")
 				.Append(Nl);
 			sb.Append("\t\tpublic static readonly IReadOnlyList<CardEntry> All = Build();").Append(Nl).Append(Nl);
 			sb.Append("\t\tprivate static IReadOnlyList<CardEntry> Build()").Append(Nl);
@@ -262,9 +338,7 @@ namespace HdtArenaHelper.Training
 				sb.Append("\t\t}").Append(Nl);
 			}
 
-			sb.Append("\t}").Append(Nl);
-
-			WriteNamedAccessors(sb, all);
+			sb.Append("\t}").Append(Nl).Append(Nl);
 		}
 
 		/// <summary>
@@ -274,12 +348,13 @@ namespace HdtArenaHelper.Training
 		/// Not <c>Cards</c>, which would collide with <c>HearthDb.Cards</c> in the test files that
 		/// use both.
 		/// </summary>
-		private static void WriteNamedAccessors(StringBuilder sb, IReadOnlyList<(Card Card, CardSet Set)> all)
+		private static void WriteNamedAccessors(StringBuilder sb, string className, string database,
+			string summary, IReadOnlyList<(Card Card, CardSet Set)> all)
 		{
 			sb.Append(Nl);
-			sb.Append("\t/// <summary>Every card in the pool, by name. See CardDatabase.All for the list form.</summary>")
+			sb.Append($"\t/// <summary>{summary} See {database}.All for the list form.</summary>")
 				.Append(Nl);
-			sb.Append("\tpublic static class HSCard").Append(Nl);
+			sb.Append($"\tpublic static class {className}").Append(Nl);
 			sb.Append("\t{").Append(Nl);
 			sb.Append("\t\tprivate static readonly Dictionary<int, CardEntry> ById = BuildIndex();").Append(Nl);
 			sb.Append(Nl);
@@ -289,8 +364,8 @@ namespace HdtArenaHelper.Training
 			sb.Append(Nl);
 			sb.Append("\t\tprivate static Dictionary<int, CardEntry> BuildIndex()").Append(Nl);
 			sb.Append("\t\t{").Append(Nl);
-			sb.Append("\t\t\tvar index = new Dictionary<int, CardEntry>(CardDatabase.All.Count);").Append(Nl);
-			sb.Append("\t\t\tforeach(var card in CardDatabase.All)").Append(Nl);
+			sb.Append($"\t\t\tvar index = new Dictionary<int, CardEntry>({database}.All.Count);").Append(Nl);
+			sb.Append($"\t\t\tforeach(var card in {database}.All)").Append(Nl);
 			sb.Append("\t\t\t\tindex[card.DbfId] = card;").Append(Nl);
 			sb.Append("\t\t\treturn index;").Append(Nl);
 			sb.Append("\t\t}").Append(Nl);

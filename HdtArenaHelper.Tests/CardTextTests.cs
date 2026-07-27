@@ -70,7 +70,7 @@ namespace HdtArenaHelper.Tests
 		{
 			// Every caller pattern-matches the result, so the no-text case must be a harmless empty
 			// string: a null here would throw from inside a scoring path that is supposed to fail soft.
-			Assert.Equal(string.Empty, CardText.Flattened(Card(HSCard.GarroshHellscream)));
+			Assert.Equal(string.Empty, CardText.Flattened(Card(HSHero.GarroshHellscream)));
 		}
 
 		[Fact]

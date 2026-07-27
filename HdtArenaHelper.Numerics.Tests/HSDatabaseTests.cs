@@ -14,7 +14,7 @@ namespace HdtArenaHelper.Numerics.Tests
 	/// Every assertion here is structural, never a count: the pool moves with each patch, so a test
 	/// pinning "7367 cards" would fail on data rather than on a defect.
 	/// </summary>
-	public class CardDatabaseTests
+	public class HSDatabaseTests
 	{
 		private static IReadOnlyList<CardEntry> All => HdtArenaHelper.CardDatabase.CardDatabase.All;
 
@@ -66,14 +66,35 @@ namespace HdtArenaHelper.Numerics.Tests
 		}
 
 		[Fact]
-		public void Hero_powers_are_included()
+		public void The_three_databases_hold_three_different_KINDS_of_thing()
 		{
-			// They were excluded at first, by a filter that never fired: hero powers are not
-			// COLLECTIBLE, so filtering the collectible set by type removed nothing and the exclusion
-			// was an accident of the source query. They are in on purpose now — HeroPowerThreat
-			// classifies them, and its fixtures are the reason the pool is committed at all.
-			Assert.Contains(All, c => c.Type == "HERO_POWER");
-			Assert.Equal("HERO_POWER", HSCard.Fireblast.Type);
+			// Hero powers and heroes are in the pool on purpose — HeroPowerThreat classifies them and
+			// their fixtures are half the reason it is committed — but in their OWN databases. One
+			// list holding all three meant a caller could iterate the pool and meet something it has
+			// no rule for, and it made the name collision below possible.
+			Assert.DoesNotContain(All, c => c.Type == "HERO_POWER" || c.Type == "HERO");
+
+			Assert.NotEmpty(HeroPowerDatabase.All);
+			Assert.All(HeroPowerDatabase.All, c => Assert.Equal("HERO_POWER", c.Type));
+
+			Assert.NotEmpty(HeroDatabase.All);
+			Assert.All(HeroDatabase.All, c => Assert.Equal("HERO", c.Type));
+		}
+
+		[Fact]
+		public void A_name_shared_by_a_card_and_a_hero_power_resolves_to_BOTH()
+		{
+			// The regression that split them. "Icy Touch" is a Death Knight Frost spell AND a hero
+			// power; with everything in one class the bare name went to whichever had the lower dbf
+			// id — the hero power — so a fixture asking for the spell silently got something that is
+			// not even playable, and a probe written against it measured the wrong card.
+			Assert.Equal("SPELL", HSCard.IcyTouch.Type);
+			Assert.Equal("FROST", HSCard.IcyTouch.SpellSchool);
+			Assert.Equal("HERO_POWER", HSHeroPower.IcyTouch.Type);
+			Assert.NotEqual(HSCard.IcyTouch.DbfId, HSHeroPower.IcyTouch.DbfId);
+
+			Assert.Equal("HERO_POWER", HSHeroPower.Fireblast.Type);
+			Assert.Equal("HERO", HSHero.JainaProudmoore.Type);
 		}
 
 		[Fact]

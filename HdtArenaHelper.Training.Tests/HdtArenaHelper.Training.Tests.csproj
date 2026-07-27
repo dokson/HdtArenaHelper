@@ -36,7 +36,7 @@
     caused it, rather than in one of the other two test projects.
   -->
   <ItemGroup>
-    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
+    <Compile Include="..\Generated\HSDatabase.g.cs" Link="Generated\HSDatabase.g.cs" />
   </ItemGroup>
 
   <ItemGroup>

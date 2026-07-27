@@ -65,8 +65,8 @@ never scrape a paywalled service or bundle/redistribute anyone's data.
 | HSReplay arena `api/v1/arena/card_stats/free/` | Real arena win-rate / popularity per card + class tier list | ✅ used — the ONLY win-rate source, weight 1.0, and also the training target |
 | HearthDb (bundled with HDT) | Card metadata for the offline heuristic, the mulligan advisor and id resolution | ✅ used, offline |
 
-**The card pool is COMMITTED to this repo** — `docs/CardDatabase.md` to grep and
-`Generated/CardDatabase.g.cs` for the test projects to compile — and that is a redistribution, so
+**The card pool is COMMITTED to this repo** — `docs/hearthstone-{cards,hero-powers,heroes}.md` to
+grep and `Generated/HSDatabase.g.cs` for the test projects to compile — and that is a redistribution, so
 name it correctly. HearthDb's **code** is MIT; its card **data** comes from `HearthSim/hsdata`,
 which ships no licence at all and states that it is extracted from Blizzard's client. So these
 files carry Blizzard content under the **Fan Content Policy**, never under MIT, and the earlier
@@ -315,27 +315,35 @@ whole deck, on the UI thread.
 | `SelfUpdater.cs` | In-plugin auto-update over the public GitHub releases. **Two phases, deliberately:** a check (throttled 1×/day) downloads the bare `HdtArenaHelper.dll` release asset and only PARKS it as `*.dll.new`; `ApplyPendingUpdate()` performs the swap at the **next OnLoad**. Never swap when the download finishes — the check starts at load, so downloads often complete seconds before the user quits, and process death between the two moves leaves the folder with no `.dll`, which HDT can never repair (it loads only exact `.dll` files, so no plugin code runs again). At OnLoad the process has a whole session ahead of it. The swap renames the running (locked) DLL to `*.dll.old`: a loaded assembly cannot be overwritten or deleted but CAN be renamed on NTFS (verified empirically). Recovery retries with a `File.Copy` fallback and must never return without a DLL in place. Validation before anything is touched: MZ header, size cap, and the **managed assembly identity** (`AssemblyName.GetAssemblyName` must say `HdtArenaHelper`) — an MZ check alone accepts any PE, and installing the wrong one is an unloadable plugin. Asset URLs are host-checked (`IsTrustedAssetUrl`, GitHub HTTPS hosts only). Takes a `CancellationToken` cancelled from `OnUnload`. The previous version is KEPT as `*.dll.old` (the manual rollback), moved aside to `*.dll.old.prev` during a swap and only dropped once it succeeds — and promoted back if a swap died mid-dance. **Trust boundary**: bytes come only from this repo's official releases over HTTPS with no signature verification — the same trust as the user's original manual install. Fail-soft to a manual "open releases page" |
 | `HdtArenaHelper.Numerics/` | Pure maths — the scikit-learn-equivalent ridge solver and the descriptive statistics — with **no HDT/HearthDb/HearthMirror reference at all**. That isolation is the point: keep it that way, and never add an `HSDT.props` import here |
 | `HdtArenaHelper.Tests/` | xUnit tests for the PLUGIN, all offline but requiring HDT installed (HearthDb): aggregator blend + shrink rules, heuristic golden scores (pinned to the trainer, the deliberate weights-changed tripwire), synergy directions/caps/clamp + availability damping, win-rate parsing via synthetic caches, the self-updater swap on temp files, `DraftWatcher.BuildDeckEditPlan`/`ToDbfId`, `PlaqueTier`, class win-rate re-centring, and the mulligan advisor's rule directions (each case built from a DECK, since the same card is a keep in one and a toss in another — a fixture that did not vary the deck would be testing a tier list). Also the card pool's **drift test**: the committed files are diffed byte-for-byte against `CardPoolDump.Build()`, so a pool nobody re-dumped fails here instead of rotting in a file no code reads. It reports the first differing LINE, because "is stale" over a megabyte-scale file leaves the reader to work out by hand whether a patch moved one card or the generator changed every row |
-| `HdtArenaHelper.Training/CardPoolDump.cs` | Generates the committed card pool (`-- --dump-cards`). Rules and traps: see [The committed card pool](#the-committed-card-pool) below |
-| `Generated/CardDatabase.g.cs` / `docs/CardDatabase.md` | That pool, generated. **Referenced by no plugin csproj, by design** — see the same section |
+| `HdtArenaHelper.Training/HSDatabaseGenerator.cs` | Generates the committed pool (`-- --dump-database`). Rules and traps: see [The committed card pool](#the-committed-card-pool) below |
+| `Generated/HSDatabase.g.cs` / `docs/hearthstone-*.md` | That pool, generated. **Referenced by no plugin csproj, by design** — see the same section |
 | `HdtArenaHelper.Numerics.Tests/` | The only suite that runs **without HDT installed** (`dotnet test HdtArenaHelper.Numerics.Tests`): ridge solver against known-truth properties, and the statistics — including `RegressionSlope`, whose asymmetry-vs-correlation test is the guard against the mistake `ModelOnlyShrink` was first derived with. Also the committed pool's own invariants, which need no card DB: unique ids, a TOTAL ordering, no line breaks in card text, and that every `CardFlags` axis is carried by at least one card — the last one is the guard against a tag read that silently yields `None` for everything, which every other assertion there would pass. Structural only, never counts: the pool moves with each patch, so a pinned card count would fail on data rather than on a defect |
 | `HdtArenaHelper.Training.Tests/` | The trainer's deterministic pieces: `WeightsFile.RoundWeights` (the drop-below-floor rule the runtime depends on), `metrics.json` format (LF only, invariant decimals), `HoldoutReport.ShrinkFromSlopes` (ratio, clamp, NaN refusal). Needs HDT, because the trainer references the plugin |
 | `HdtArenaHelper.Training/` | Fits the heuristic weights → `arena_weights.json` (embedded into the plugin); ridge and statistics come from `HdtArenaHelper.Numerics`, features from the plugin's `BuildFeatures`. Re-run per patch with `dotnet run --project HdtArenaHelper.Training`, plus `-- --offline` to refit from the last payload snapshot without touching the network. One file per responsibility: `TrainingConfig` (every fit-policy knob), `PayloadFetcher`, `TrainingRows`, `ModelSelection` (CV + holdouts), `Bootstrap` (coefficient SEs + gate noise floor), `WeightsFile`, `RunMetrics` (`metrics.json`, what CI gates on). Findings: `REPORT.md` |
 
 ### The committed card pool
 
-`docs/CardDatabase.md` to grep and `Generated/CardDatabase.g.cs` to compile, both from
-`CardPoolDump.Run`. What is in them: every COLLECTIBLE card, plus every HERO POWER and every HERO.
-The last two are **not collectible**, so they come from `Cards.All` by type — which is also how the
-original `Type != HERO_POWER` filter turned out to exclude nothing at all. Stops short of the rest of
-`Cards.All`: those are tokens and enchantments no rule is ever handed, and they carry thousands of
-duplicate names (one recurs 79 times, called `???`), which would bury the accessors below in suffixes.
+`docs/hearthstone-cards.md`, `docs/hearthstone-hero-powers.md` and `docs/hearthstone-heroes.md` to
+grep, `Generated/HSDatabase.g.cs` to compile, all from `HSDatabaseGenerator.Run`. What is in them:
+every COLLECTIBLE card, plus every HERO POWER and every HERO. The last two are **not collectible**,
+so they come from `Cards.All` by type — which is also how the original `Type != HERO_POWER` filter
+turned out to exclude nothing at all. Stops short of the rest of `Cards.All`: those are tokens and
+enchantments no rule is ever handed, and they carry thousands of duplicate names — measured, one
+recurs dozens of times under a placeholder name — which would bury the accessors below in suffixes.
 
-**`HSCard` is the point of the whole thing: test fixtures name cards, they never carry ids.**
+**Three KINDS, three databases, three accessor classes**: `CardDatabase`/`HSCard`,
+`HeroPowerDatabase`/`HSHeroPower`, `HeroDatabase`/`HSHero`. Not a taste call — "Icy Touch" is both a
+Death Knight spell and a hero power, and with one shared list the bare name went to whichever had the
+lower dbf id (the hero power), so a fixture asking for the spell got something that is not even
+playable. It happened for real, to a measurement in this repo. Keep them apart: nothing that takes a
+card should be able to receive a hero power.
+
+**That is the point of the whole thing: test fixtures name cards, they never carry ids.**
 `HSCard.Tuskpiercer`, not `"BAR_330"` plus a comment — see the testing rule in **Build & install**
 for the two exceptions and for what a fixture does when it needs a HearthDb `Card`. Reprints share a
-name, so the canonical printing (lowest dbf id, the same rule `CardIdentity` uses) keeps the bare
-name and the rest take a set suffix: `Assassinate_CORE`. Named `HSCard` and not `Cards` because that
-collides with `HearthDb.Cards` in the files that use both.
+name WITHIN a kind, so the canonical printing (lowest dbf id, the same rule `CardIdentity` uses)
+keeps the bare name and the rest take a set suffix: `Assassinate_CORE`. Named `HSCard` and not
+`Cards` because that collides with `HearthDb.Cards` in the files that use both.
 
 **Referenced by no plugin csproj, deliberately** — the plugin reads the same data from HearthDb at
 runtime, so this would be megabytes of dead weight in the shipped DLL. The three TEST projects
@@ -372,6 +380,14 @@ every guard below then applies to the three-drop exactly as to the two-drop.
 keep unless the DECK can do better in that slot, it needs a friendly board that does not exist yet, has
 its Combo switched off going first, or dies for free to a hero power.
 
+**A cheap spell that SUMMONS counts as a permanent here** — asking what a card IS rather than what it
+does left Mining Casualties, two 1/1s on turn two, with no verdict at all. Two guards, both from
+running the rule over the pool: **quoted text belongs to the TOKEN** (the recruits' own Deathrattle is
+not the spell's condition, and reading it as one rejected the very card the rule is for), and a
+**quest is excluded by its TAG**, since a quest states what you must DO and reads exactly like a
+summon. Counts in REPORT.md §16; the rule against cheap spells otherwise stands, for the removal and
+reach it was written for.
+
 **"Below average" is measured against your deck's slot, never against the pool.** That distinction is
 the class's premise, and one rule used to break it: an absolute score floor answers the DRAFT's
 question ("is this card good") inside a class built to answer "is it your best play on this turn given
@@ -395,10 +411,24 @@ card:
 a cost with a card that was itself demoted is not a duplicated slot, and reading a 2-mana location that
 wants a board plus a real 2-drop as two early plays threw away the only one.
 
+**A card that UPGRADES WHILE HELD is not simply too slow** (`UpgradesWhileHeld`): Infuse as a keyword,
+or the longhand "while this is in your hand". Holding it IS the plan, the same argument
+`HasTradeUpside` rests on — so Situational, never Keep, because whether the enablers happen is not
+something this advisor can know. **Vetoed on "in hand or deck"**, and that veto is the whole rule:
+Lotus Troublemaker's counter ticks in the deck too, so holding it buys nothing. Counts in REPORT.md §16.
+
 **The top end goes back** unless the card scores as a bomb — or unless trading UPGRADES it (`HasTradeUpside`)
 and turn 1 is otherwise empty, which buys value from a mana that was going to be wasted. Being Tradeable
 is not enough: a card that merely cycles still goes back, because cycling something you did not want is
 worse than the free replacement a mulligan already gives you.
+
+**A cheap body whose text needs a WEAPON is not a turn-1 play** — the friendly-board rule one
+resource over, and stricter: a board can exist by turn 2, a weapon cannot exist on turn 1 at all,
+since nothing is equipped before your first turn. Found live on Air Guitarist ("Battlecry: Give your
+weapon +1 Durability"), which read as a plain turn-1 keep because the dependency list named only
+minion things. Vetoed when the card EQUIPS one itself, the same shape as the synergy engine's
+generation veto. Measured THROUGH the rule and not by grepping the pool — the two disagreed, because
+a grep counts hero powers the rule is never handed (REPORT.md §16).
 
 **A hand that does NOTHING before turn 4 goes back whole** — the one rule that reads the HAND rather
 than a card, and the reason it had to exist: every other rule here is relative ("cheap for its slot",

@@ -1,7 +1,7 @@
 name: card-database
 
 # Reflects HearthDb (the bundled card DB, pinned to HDT_VERSION) into
-# docs/CardDatabase.md and Generated/CardDatabase.g.cs, and commits them
+# docs/hearthstone-*.md and Generated/HSDatabase.g.cs, and commits them
 # straight to main when they changed. No PR review gate: a diff here is the
 # pool moving with a patch, not a scoring decision.
 #
@@ -44,16 +44,19 @@ jobs:
           $path = .\scripts\resolve-hdt.ps1 -Version $env:HDT_VERSION
           "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Dump card database
+      - name: Dump the Hearthstone database
         shell: pwsh
-        run: dotnet run --project HdtArenaHelper.Training -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" -- --dump-cards
+        run: dotnet run --project HdtArenaHelper.Training -c Release "/p:HSDTPath=${{ steps.hdt.outputs.path }}" -- --dump-database
 
       - name: Commit if changed
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add docs/CardDatabase.md Generated/CardDatabase.g.cs
+          # Every generated file, by the same glob the generator writes — a file staged by name
+          # here is one that stops being refreshed the day the generator adds another.
+          git add docs/hearthstone-cards.md docs/hearthstone-hero-powers.md `
+                  docs/hearthstone-heroes.md Generated/HSDatabase.g.cs
           if (git diff --cached --quiet) {
             Write-Host 'no change: pool is unchanged since the last run.'
           } else {

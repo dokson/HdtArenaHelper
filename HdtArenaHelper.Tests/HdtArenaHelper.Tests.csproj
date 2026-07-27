@@ -33,7 +33,7 @@
     HearthDb at runtime, so committing 1.7 MB of the same data into the shipped DLL buys nothing.
   -->
   <ItemGroup>
-    <Compile Include="..\Generated\CardDatabase.g.cs" Link="Generated\CardDatabase.g.cs" />
+    <Compile Include="..\Generated\HSDatabase.g.cs" Link="Generated\HSDatabase.g.cs" />
   </ItemGroup>
 
   <!--

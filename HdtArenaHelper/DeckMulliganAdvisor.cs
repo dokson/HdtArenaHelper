@@ -109,6 +109,108 @@ namespace HdtArenaHelper
 			return text.Length > 0 && NeedsBoardRe.IsMatch(text);
 		}
 
+		/// <summary>
+		/// Cards whose effect needs a weapon already equipped. Kept apart from
+		/// <see cref="NeedsExistingBoard"/> because the two fail differently: a board can exist by
+		/// turn 2, a weapon cannot exist on turn 1 at all.
+		///
+		/// Vetoed when the card EQUIPS one itself — the same trap the synergy engine's generation
+		/// veto exists for, since a card that supplies its own dependency does not depend on you.
+		/// No card at cost 2 or less does both today; the veto is here so that a future one cannot
+		/// be quietly condemned.
+		/// </summary>
+		private static bool NeedsExistingWeapon(Card card) =>
+			DependsOnAnEquippedWeapon(CleanText(card));
+
+		/// <summary>
+		/// A card that gets BETTER while it sits in your hand — Infuse as a keyword, or the longhand
+		/// "while this is in your hand" wording that predates it, whether it gains stats or costs less.
+		///
+		/// Vetoed for "in hand or deck": that counter ticks whether you hold the card or not, so
+		/// holding it buys nothing. Lotus Troublemaker is the case — a card written precisely so you
+		/// do NOT have to keep it, and the veto is what tells the two families apart.
+		/// </summary>
+		internal static bool UpgradesWhileHeld(string text) =>
+			!string.IsNullOrEmpty(text)
+			&& !InHandOrDeckRe.IsMatch(text)
+			&& (InfuseRe.IsMatch(text) || WhileInYourHandRe.IsMatch(text));
+
+		private static readonly Regex InfuseRe = new Regex(
+			@"\binfuse\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		// \s+ and not spaces: the tooltip wraps inside these phrases like any other.
+		private static readonly Regex WhileInYourHandRe = new Regex(
+			@"while\s+(this\s+is\s+)?in\s+your\s+hand", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		private static readonly Regex InHandOrDeckRe = new Regex(
+			@"in\s+hand\s+or\s+deck", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// A quest, sidequest or questline, read off the TAG and never the text — the same rule the
+		/// synergy engine's dead-card lever follows. Needed here because a quest's text states what
+		/// you must DO ("Summon 5 minions with 5+ Attack"), which reads exactly like a card that
+		/// summons: Jungle Giants, Unite the Murlocs and Unseal the Vault all slipped through the
+		/// text check until this was added.
+		/// </summary>
+		private static bool IsQuest(Card card) =>
+			card.Entity.GetTag(GameTag.QUEST) != 0
+			|| card.Entity.GetTag(GameTag.SIDEQUEST) != 0
+			|| card.Entity.GetTag(GameTag.QUESTLINE) != 0;
+
+		/// <summary>
+		/// A spell that puts a body on the board the turn you cast it — a 2-mana "summon two 1/1s"
+		/// is a two-drop however the card is typed.
+		///
+		/// Vetoed for every summon that is NOT that: the opponent's, one that waits for a trigger
+		/// (Deathrattle, "at the end of", "whenever", "after"), and one that depends on a condition
+		/// ("if it survives"). This is a KEEP — a positive claim — so it fails toward silence, which
+		/// is the direction the whole advisor fails in.
+		/// </summary>
+		internal static bool DevelopsBoard(string text)
+		{
+			if(string.IsNullOrEmpty(text))
+				return false;
+
+			// QUOTED text belongs to the TOKEN this card makes, not to this card. Mining Casualties
+			// reads: Summon two 1/1 Silver Hand Recruits with "Deathrattle: Summon a 1/1 Frail
+			// Ghoul" — the Deathrattle is the recruit's, and reading it as this card's condition
+			// rejected the very card that prompted the rule. Measured through the rule on the pool.
+			var own = QuotedRe.Replace(text, " ");
+			return SummonsRe.IsMatch(own) && !ConditionalSummonRe.IsMatch(own);
+		}
+
+		private static readonly Regex QuotedRe = new Regex(
+			"\"[^\"]*\"", RegexOptions.Compiled);
+
+		// \s+ throughout: the tooltip wraps inside these phrases as readily as anywhere else.
+		private static readonly Regex ConditionalSummonRe = new Regex(
+			@"\byour\s+opponent\b|\bfor\s+your\s+opponent\b|\bdeathrattle\b|\bat\s+the\s+end\s+of\b"
+			+ @"|\bwhenever\b|\bafter\s+you\b|\bif\b|\bsecret\b|\bdormant\b",
+			RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>
+		/// A card whose cost is paid in HEALTH, not mana. One printed wording covers all of them —
+		/// "costs Health instead of Mana" — so this is a phrase match rather than a pattern, and
+		/// \s+ because the tooltip may wrap inside it.
+		/// </summary>
+		internal static bool PaysWithHealth(string text) =>
+			!string.IsNullOrEmpty(text) && PaysWithHealthRe.IsMatch(text);
+
+		private static readonly Regex PaysWithHealthRe = new Regex(
+			@"\bcosts?\s+health\s+instead\s+of\s+mana", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		/// <summary>The text-level decision, exposed so the rule can be tested without a card.</summary>
+		internal static bool DependsOnAnEquippedWeapon(string text) =>
+			!string.IsNullOrEmpty(text) && NeedsWeaponRe.IsMatch(text) && !EquipsWeaponRe.IsMatch(text);
+
+		// \s+ and not a literal space: card text carries the client's tooltip line breaks, so
+		// "your\nweapon" is the same phrase and must match. See CardText.
+		private static readonly Regex NeedsWeaponRe = new Regex(
+			@"\byour\s+weapon", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+		private static readonly Regex EquipsWeaponRe = new Regex(
+			@"\bequip\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
 		private static readonly Regex NeedsBoardRe = new Regex(
 			// "friendly <anything>" covers the tribal wording too — a location that wants your
 			// Beasts is as blank on turn 1 as one that wants your minions.
@@ -261,6 +363,15 @@ namespace HdtArenaHelper
 			if(card.Type == CardType.HERO)
 				return new MulliganCardVerdict(MulliganVerdict.Situational);
 
+			// The same reason, a different currency: a card that costs HEALTH instead of mana has a
+			// printed cost that says nothing about when you can play it. Blood Draw reads 3 and is
+			// castable on turn 1 for three life — so every tempo rule below, which is built on the
+			// mana cost, would be answering the wrong question. Silence rather than a guess: weighing
+			// life against tempo is exactly the judgement this advisor has no data for. Ten
+			// collectible cards say it, from 0 to 6 mana.
+			if(PaysWithHealth(CleanText(card)))
+				return new MulliganCardVerdict(MulliganVerdict.Situational);
+
 			// 1. TEMPO IS THE MACRO-RULE, and this is where an earlier version of this class had it
 			//    backwards. It treated "cheap" as a condition attached to a thin deck; the mulligan
 			//    is decided first by what the card DOES on turns one and two, and only then by the
@@ -273,8 +384,15 @@ namespace HdtArenaHelper
 			// you want to draw INTO once there is a target; held from turn zero they answer a board
 			// that does not exist yet. Only a permanent — a body, a weapon, a location — buys the
 			// turn this rule is about.
+			//
+			// With one exception, and it is not a softening of the rule but the same rule read
+			// correctly: a spell that SUMMONS is a body by another name. Mining Casualties puts two
+			// 1/1s down on turn two and came back with no verdict at all, because the check asked
+			// what the card IS rather than what it does. The veto below keeps it honest — a summon
+			// that is conditional, delayed or the opponent's is not a turn-two play.
 			var isPermanent = card.Type == CardType.MINION || card.Type == CardType.WEAPON
-				|| card.Type == CardType.LOCATION;
+				|| card.Type == CardType.LOCATION
+				|| (card.Type == CardType.SPELL && !IsQuest(card) && DevelopsBoard(CleanText(card)));
 
 			// How far "early" reaches is a property of the DECK, not of the game. A three-drop is
 			// not an early play in the abstract, but a deck that cannot curve out has no earlier
@@ -328,6 +446,16 @@ namespace HdtArenaHelper
 				if(NeedsExistingBoard(card))
 					return new MulliganCardVerdict(MulliganVerdict.Situational,
 						"needs a board");
+
+				// The same rule, one resource over, and STRICTER: a board on turn 1-2 is merely
+				// unlikely, while a weapon on turn 1 is impossible — nothing can be equipped before
+				// your first turn. Air Guitarist ("Battlecry: Give your weapon +1 Durability") was
+				// coming back as a plain turn-1 keep, seen live, because the dependency list named
+				// only minion things. Measured on the pool: 20 collectible cards at cost 2 or less
+				// depend on a weapon you already have, most of them Rogue's poisons.
+				if(NeedsExistingWeapon(card))
+					return new MulliganCardVerdict(MulliganVerdict.Situational,
+						"needs a weapon you do not have yet");
 
 				// A Combo card played first is a vanilla body with its text switched off, and going
 				// first there is nothing to combo off on turn 1-2. On the coin it is the opposite —
@@ -461,6 +589,24 @@ namespace HdtArenaHelper
 				&& !hand.Where((c, i) => i != index).Any(c => EffectiveTurn(c, onCoin) <= 1))
 				return new MulliganCardVerdict(MulliganVerdict.Situational,
 					"upgrades when traded, and turn 1 is free");
+
+			// 5b. A card that UPGRADES while you hold it is not simply too slow either, and for the
+			//     same reason as 5a: holding it IS the plan, so the printed cost is not the whole
+			//     story. Infuse states it as a keyword ("Infuse (3): Gain +2/+2"), and a handful of
+			//     cards say it longhand ("Whenever a friendly minion dies while this is in your hand,
+			//     gain +1/+1"). 29 Infuse cards in the pool, 13 of them at cost 5 or more, which is
+			//     the only place this rule can fire.
+			//
+			//     Vetoed for "in hand OR DECK": Lotus Troublemaker's counter ticks whether you hold
+			//     it or not, so holding it buys nothing and it is a normal top-end card. That veto is
+			//     the whole distinction — without it the rule would exempt cards designed so you do
+			//     not have to keep them.
+			//
+			//     Situational, never Keep: the upgrade needs its enablers to happen, and how likely
+			//     that is is exactly the judgement no data here can settle.
+			if(turn >= TopEndCost && UpgradesWhileHeld(CleanText(card)))
+				return new MulliganCardVerdict(MulliganVerdict.Situational,
+					"upgrades while you hold it");
 
 			if(turn >= TopEndCost && !IsSelfDiscounting(card))
 			{

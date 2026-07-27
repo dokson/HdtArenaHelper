@@ -47,8 +47,75 @@ namespace HdtArenaHelper
 		public event EventHandler<CardChoiceEventArgs>? OnChoicesChanged;
 		public event EventHandler? OnChoicesGone;
 
-		private string? _lastSignature;
-		private bool _showing;
+		private readonly ChoiceGate _gate = new ChoiceGate(PollsBeforeGone);
+
+		/// <summary>
+		/// Consecutive empty polls before a choice counts as GONE. The client drops
+		/// <c>IsVisible</c> for a moment mid-choice, and clearing on the first empty poll reset the
+		/// dedup key, so the very same Discover was rendered again seconds later. Measured on a live
+		/// session: 8 of 35 in-game choices were exact repeats of the trio before them, four of those
+		/// within 6-12 seconds — the window this closes. The longer repeats are a different bug, a
+		/// list the client re-raises after the choice is over, and a debounce cannot fix that one.
+		///
+		/// Three at a 500 ms poll is ~1.5 s of tolerance: far longer than a flicker, far shorter than
+		/// a player picking a card, so a genuinely new choice is never merged into the old one.
+		/// </summary>
+		internal const int PollsBeforeGone = 3;
+
+		/// <summary>
+		/// The dedup-and-debounce state machine, kept apart from HearthMirror so it can be tested —
+		/// the same reason <see cref="BuildChoicePlan"/> is. Its behaviour is invisible from outside:
+		/// getting it wrong either re-announces a choice the player already made or swallows a real
+		/// one, and neither shows up until someone reads a log.
+		/// </summary>
+		internal sealed class ChoiceGate
+		{
+			private readonly int _pollsBeforeGone;
+			private string? _signature;
+			private bool _showing;
+			private int _missed;
+
+			internal ChoiceGate(int pollsBeforeGone) => _pollsBeforeGone = pollsBeforeGone;
+
+			/// <summary>A choice is on screen. True when it is NEW and should be announced.</summary>
+			internal bool Announce(string signature)
+			{
+				_missed = 0;
+				if(_showing && signature == _signature)
+					return false;
+
+				_signature = signature;
+				_showing = true;
+				return true;
+			}
+
+			/// <summary>
+			/// A poll saw no choice. True only once the absence has lasted, meaning the choice is
+			/// really over and the "gone" event should fire. A single empty poll is a flicker: the
+			/// dedup key must survive it, or the very same Discover is announced again.
+			/// </summary>
+			internal bool Miss()
+			{
+				if(!_showing)
+				{
+					_signature = null;
+					return false;
+				}
+
+				if(++_missed < _pollsBeforeGone)
+					return false;
+
+				Reset();
+				return true;
+			}
+
+			internal void Reset()
+			{
+				_signature = null;
+				_showing = false;
+				_missed = 0;
+			}
+		}
 
 		/// <summary>Only ever live during a game; the base gate enforces it.</summary>
 		protected override SceneMode Scene => SceneMode.GAMEPLAY;
@@ -64,8 +131,7 @@ namespace HdtArenaHelper
 		public override void Reset()
 		{
 			base.Reset();
-			_lastSignature = null;
-			_showing = false;
+			_gate.Reset();
 		}
 
 		protected override void PollCore()
@@ -75,7 +141,7 @@ namespace HdtArenaHelper
 
 			if(choices == null || !choices.IsVisible || choices.Cards == null)
 			{
-				Clear();
+				Missed();
 				return;
 			}
 
@@ -83,21 +149,25 @@ namespace HdtArenaHelper
 				arenaInfo?.Deck?.Hero, arenaInfo?.Deck?.HeroPower);
 			if(plan == null)
 			{
-				Clear();
+				Missed();
 				return;
 			}
 
 			// Dedup on the offered ids: unlike the draft's DraftChoices there is no Version field,
 			// and re-scoring the same Discover twice a second would re-run the synergy engine over
 			// the whole deck on the UI thread for nothing.
-			if(plan.Signature == _lastSignature)
+			if(!_gate.Announce(plan.Signature))
 				return;
-			_lastSignature = plan.Signature;
-			_showing = true;
 
 			Log($"card choice: {plan.Args.OfferedDbfIds.Count} offered, " +
 				$"class={plan.Args.DeckClass}, deck={plan.Args.DeckDbfIds.Count}");
 			OnChoicesChanged?.Invoke(this, plan.Args);
+		}
+
+		private void Missed()
+		{
+			if(_gate.Miss())
+				OnChoicesGone?.Invoke(this, EventArgs.Empty);
 		}
 
 		/// <summary>What one poll resolved: the event to fire, plus the dedup key for it.</summary>
@@ -147,12 +217,19 @@ namespace HdtArenaHelper
 		}
 
 
+		/// <summary>
+		/// One empty poll is not "the choice is over" — see <see cref="PollsBeforeGone"/>. Until the
+		/// count is reached nothing happens at all: the overlay stays up (a flicker the player never
+		/// sees) and, crucially, the dedup key survives, so the same choice cannot be re-announced.
+		/// </summary>
+
+		/// <summary>
+		/// Leaving the scene ends the choice at once — no debounce there, because the screen the
+		/// choice belonged to is gone, which is the one thing a flicker never means.
+		/// </summary>
 		private void Clear()
 		{
-			_lastSignature = null;
-			if(!_showing)
-				return;
-			_showing = false;
+			_gate.Reset();
 			OnChoicesGone?.Invoke(this, EventArgs.Empty);
 		}
 

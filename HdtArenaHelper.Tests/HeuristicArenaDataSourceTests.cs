@@ -73,8 +73,8 @@ namespace HdtArenaHelper.Tests
 		public void Class_pick_hero_skins_are_not_scored()
 		{
 			// The win-rate source rates these by class tier instead.
-			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream)));
-			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.JainaProudmoore)));
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSHero.GarroshHellscream)));
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSHero.JainaProudmoore)));
 		}
 
 		[Fact]
@@ -88,7 +88,7 @@ namespace HdtArenaHelper.Tests
 			// The cost of abstaining is near zero — hero cards are collectible, so the win-rate
 			// feeds cover them — and where nothing covers them the aggregator's shrink says 50,
 			// which is what "we do not know" should look like.
-			Assert.Null(Source.GetNormalizedScore(Dbf(HSCard.FrostLichJaina)));
+			Assert.Null(Source.GetNormalizedScore(Dbf(HSHero.FrostLichJaina)));
 		}
 
 		/// <summary>

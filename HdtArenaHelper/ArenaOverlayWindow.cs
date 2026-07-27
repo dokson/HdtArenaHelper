@@ -182,6 +182,12 @@ namespace HdtArenaHelper
 			Content = root;
 
 			Loaded += (_, __) => MakeClickThrough();
+			// The run-summary panel is placed in REAL client pixels, so it cannot be positioned
+			// before the window has been measured. Seen live: it rendered once at 0,0 against a
+			// client of 0x0 and stayed there, because the watcher dedups and never asked again.
+			// Re-anchoring on every size change fixes both halves — the first, too-early placement
+			// and any later resize.
+			SizeChanged += (_, __) => PositionRunSummary();
 		}
 
 		/// <summary>
@@ -226,7 +232,9 @@ namespace HdtArenaHelper
 		public void SetEntries(IReadOnlyList<OverlayEntry> entries, OverlayLayout layout)
 		{
 			_canvas.Children.Clear();
-			_cornerLayer.Children.Clear(); // drop any deck-review panel from the other phase
+			// Drop any deck-review or run-summary panel left by the other phase.
+			_cornerLayer.Children.Clear();
+			_runSummary = null;
 			if(entries.Count == 0)
 				return;
 
@@ -354,6 +362,7 @@ namespace HdtArenaHelper
 		{
 			_canvas.Children.Clear();
 			_cornerLayer.Children.Clear();
+			_runSummary = null;   // the panel it pointed at is gone; do not keep re-anchoring it
 			if(entries.Count == 0)
 				return;
 
@@ -418,6 +427,7 @@ namespace HdtArenaHelper
 		{
 			_canvas.Children.Clear();
 			_cornerLayer.Children.Clear();
+			_runSummary = null;   // the panel it pointed at is gone; do not keep re-anchoring it
 
 			var list = new StackPanel();
 			list.Children.Add(new TextBlock
@@ -450,13 +460,16 @@ namespace HdtArenaHelper
 			list.Children.Add(BuildSummaryRow("reach", $"{mechanics.Aoe} AoE, {mechanics.Draw} draw"));
 			if(mechanics.Profile.Length > 0)
 			{
-				// The profile and the slot it is thinnest in, together on purpose: the profile is a mean
-				// and a mean hides structure, so "midrange, thin at 3" says more than either half does.
-				var shape = mechanics.ThinnestSlot < 0
-					? $"{mechanics.Profile} ({mechanics.AverageCost:0.0})"
-					: $"{mechanics.Profile} ({mechanics.AverageCost:0.0}), thin at "
-						+ MetadataSynergyEngine.BucketLabel(mechanics.ThinnestSlot);
-				list.Children.Add(BuildSummaryRow("shape", shape));
+				// The mean is LABELLED, because "(3.5)" beside a word does not say what it counts.
+				//
+				// The thinnest slot used to be appended here and is gone on purpose: it is computed
+				// over MINIONS against a minions target, while the curve row above counts all 30
+				// cards, so the two disagreed a line apart — a deck showing 5:3 was told it was thin
+				// at five while 6:1 and 1:2 sat there visibly thinner. A statistic the reader cannot
+				// reconcile with the numbers beside it is worse than no statistic, and the curve row
+				// already shows where the deck is short.
+				list.Children.Add(BuildSummaryRow("shape",
+					$"{mechanics.Profile} (avg cost {mechanics.AverageCost:0.0})"));
 			}
 
 			var panel = new Border
@@ -473,13 +486,34 @@ namespace HdtArenaHelper
 					Opacity = 0.8
 				},
 				HorizontalAlignment = HorizontalAlignment.Left,
-				VerticalAlignment = VerticalAlignment.Top,
-				Margin = new Thickness(RunSummaryLeft * ActualWidth, RunSummaryTop * ActualHeight, 0, 0)
+				VerticalAlignment = VerticalAlignment.Top
 			};
+			_runSummary = panel;
 			_cornerLayer.Children.Add(panel);
-			Log($"layout RunSummary left={RunSummaryLeft * ActualWidth:0} top={RunSummaryTop * ActualHeight:0} "
-				+ $"(client {ActualWidth:0}x{ActualHeight:0}) curve=[{curve}]");
+			PositionRunSummary();
+			Log($"run summary panel built, curve=[{curve}]");
 		}
+
+		/// <summary>
+		/// Anchor the run-summary panel to its fraction of the CLIENT. Falls back to the design size
+		/// while the window is still unmeasured — the same guard the deck-review panel already had,
+		/// and whose absence left this one at 0,0 forever. Called again on every size change, so the
+		/// panel corrects itself the moment the real size arrives rather than waiting for a re-render
+		/// that dedup will never request.
+		/// </summary>
+		private void PositionRunSummary()
+		{
+			if(_runSummary == null)
+				return;
+
+			var width = ActualWidth > 0 ? ActualWidth : DesignWidth;
+			var height = ActualHeight > 0 ? ActualHeight : DesignHeight;
+			_runSummary.Margin = new Thickness(RunSummaryLeft * width, RunSummaryTop * height, 0, 0);
+			Log($"layout RunSummary left={RunSummaryLeft * width:0} top={RunSummaryTop * height:0} "
+				+ $"(client {ActualWidth:0}x{ActualHeight:0}, measured={ActualWidth > 0})");
+		}
+
+		private Border? _runSummary;
 
 		// Fractions of the client, not absolute pixels, so a resize re-anchors by itself. First guess:
 		// clear of the reward banner on both run screens. Re-check on a live client before trusting.
@@ -510,6 +544,7 @@ namespace HdtArenaHelper
 		{
 			_canvas.Children.Clear();        // no plaques while reviewing the deck
 			_cornerLayer.Children.Clear();
+			_runSummary = null;   // the panel it pointed at is gone; do not keep re-anchoring it
 			if(ranked.Count == 0)
 				return;
 

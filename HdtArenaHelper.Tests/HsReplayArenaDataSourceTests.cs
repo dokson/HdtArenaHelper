@@ -208,8 +208,8 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(ClassPayload);
 
-			var garrosh = source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream))!.Value.Score; // Warrior
-			var jaina = source.GetNormalizedScore(Dbf(HSCard.JainaProudmoore))!.Value.Score;   // Mage
+			var garrosh = source.GetNormalizedScore(Dbf(HSHero.GarroshHellscream))!.Value.Score; // Warrior
+			var jaina = source.GetNormalizedScore(Dbf(HSHero.JainaProudmoore))!.Value.Score;   // Mage
 
 			Assert.True(garrosh > jaina);
 		}
@@ -219,7 +219,7 @@ namespace HdtArenaHelper.Tests
 		{
 			var source = await LoadAsync(ClassPayload);
 
-			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.UtherLightbringer))); // Paladin: no bucket
+			Assert.Null(source.GetNormalizedScore(Dbf(HSHero.UtherLightbringer))); // Paladin: no bucket
 		}
 
 		[Fact]
@@ -229,7 +229,7 @@ namespace HdtArenaHelper.Tests
 
 			Assert.False(source.IsLoaded);
 			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.FieryWarAxe)));
-			Assert.Null(source.GetNormalizedScore(Dbf(HSCard.GarroshHellscream)));
+			Assert.Null(source.GetNormalizedScore(Dbf(HSHero.GarroshHellscream)));
 		}
 
 		// A card that is mediocre overall but excels in mage (and vice versa), so the

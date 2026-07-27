@@ -10,7 +10,7 @@ using Newtonsoft.Json.Linq;
 // The trainer's deterministic pieces (weight rounding, metrics format, the shrink
 // derivation) are internal but tested: HdtArenaHelper.Training.Tests covers them.
 [assembly: InternalsVisibleTo("HdtArenaHelper.Training.Tests")]
-// CardPoolDump.Build() so HdtArenaHelper.Tests can drift-test the committed card database
+// HSDatabaseGenerator.Build() so HdtArenaHelper.Tests can drift-test the committed database
 // against the live HearthDb it already references, without a second copy of the projection.
 [assembly: InternalsVisibleTo("HdtArenaHelper.Tests")]
 
@@ -38,9 +38,9 @@ namespace HdtArenaHelper.Training
 				var trainingDir = FindTrainingDir();
 				Console.WriteLine($"training dir: {trainingDir}");
 
-				if(args.Any(a => string.Equals(a, "--dump-cards", StringComparison.OrdinalIgnoreCase)))
+				if(args.Any(a => string.Equals(a, "--dump-database", StringComparison.OrdinalIgnoreCase)))
 				{
-					CardPoolDump.Run(Directory.GetParent(trainingDir)!.FullName);
+					HSDatabaseGenerator.Run(Directory.GetParent(trainingDir)!.FullName);
 					return 0;
 				}
 

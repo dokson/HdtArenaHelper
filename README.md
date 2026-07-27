@@ -262,7 +262,7 @@ individually droppable, with the offline model as the backstop.
 [MIT](./LICENSE) — for this project's own code.
 
 It does not cover the Hearthstone card data. The repository also carries a generated copy of the
-card list (`docs/CardDatabase.md` and `Generated/CardDatabase.g.cs`) so that contributors can check
+card list (`docs/hearthstone-*.md` and `Generated/HSDatabase.g.cs`) so that contributors can check
 a rule against the whole pool without a Hearthstone install. That data comes from HearthDb, whose
 **code** is MIT but whose **cards** are extracted from Blizzard's client and carry no licence of
 their own: they are Blizzard's, reproduced here as non-commercial fan content under Blizzard's

@@ -34,9 +34,9 @@ namespace HdtArenaHelper.Tests
 		public void ToClass_resolves_the_drafted_hero_class()
 		{
 			Assert.Equal(HearthDb.Enums.CardClass.WARRIOR,
-				DraftWatcher.ToClass(HSCard.GarroshHellscream.CardId));
+				DraftWatcher.ToClass(HSHero.GarroshHellscream.CardId));
 			Assert.Equal(HearthDb.Enums.CardClass.MAGE,
-				DraftWatcher.ToClass(HSCard.JainaProudmoore.CardId));
+				DraftWatcher.ToClass(HSHero.JainaProudmoore.CardId));
 		}
 
 		[Theory]

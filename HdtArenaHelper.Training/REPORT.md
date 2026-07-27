@@ -573,6 +573,53 @@ misleads most, since every card in a real deck lands in the 70s-80s. Anchoring o
 makes a class card and a neutral comparable at the same pick); the open question is whether the panel
 should show a class-relative number instead.
 
+### 16. Card-pool measurements behind the post-0.1.6 mulligan rules
+
+2026-07-27, HearthDb 36.0.4.0, measured by running each rule over the committed pool — never by
+re-implementing its patterns in a script. The one time that distinction was tested here it mattered:
+a grep counted **20** cards for the weapon rule where the rule itself sees **15**, because a grep
+counts hero powers (Sharpen, Cash In) that the rule is never handed.
+
+| Rule | Support in the pool | Note |
+|---|---|---|
+| Needs an equipped weapon (`DependsOnAnEquippedWeapon`) | **15** cards at cost ≤ 2 | mostly Rogue's poisons; 53 at any cost |
+| Pays with health (`PaysWithHealth`) | **10** distinct cards, cost 0-6 | one printed wording covers all: "costs Health instead of Mana" |
+| Develops board (`DevelopsBoard`) | **117** spells of the 1514 at cost 1-3 | after the quoted-text and quest guards below |
+| Upgrades while held (`UpgradesWhileHeld`) | **29** Infuse cards, **13** at cost ≥ 5 | plus ~11 longhand "while this is in your hand" |
+| Grows in hand **or deck** (vetoed) | **6** rows | Lotus Troublemaker: holding it buys nothing |
+
+Three guards were added because the naive pattern got a real card wrong, each found by the dump and
+not by reasoning:
+
+- **Quoted text belongs to the TOKEN.** Mining Casualties reads `Summon two 1/1 Silver Hand Recruits
+  with "Deathrattle: Summon a 1/1 Frail Ghoul"`. Reading that Deathrattle as the spell's own
+  condition rejected the very card the rule was written for.
+- **A quest's text states what you must DO**, and reads exactly like a summon: Jungle Giants, Unite
+  the Murlocs and Unseal the Vault all matched until the QUEST tag was checked instead.
+- **"In hand or deck" is not a reason to hold.** Without that veto the Infuse exemption would also
+  cover cards designed so you do NOT have to keep them.
+
+**Spell-school synergy fires but is invisible.** Measured through the engine: Icy Touch (the Death
+Knight FROST spell, dbf 78334) with two Rambunctious Stuffy drafted scores **+0.40**, against 0.00
+with no payoffs. `SpellSchoolPerPayoff` is 0.2 with a cap of 3, so the payoff direction maxes at
+**0.6** — against `MinReasonPoints` 0.5, which is what a component must reach to earn the reason
+line. So only a fully maxed school synergy is ever named, and in a whole live session (1,668 scored
+options) not one school label appeared, while tribes produced 99 Beast, 56 Elemental, 20 Undead. The
+tribal constants are 0.4 per member with a cap of 5. Whether 0.2 is the right weight is a
+calibration question; that the score moves without saying so is a defect either way.
+
+**Feed coverage is better than the raw card count suggests.** Over the same session, of 1,668 scored
+options only **54 (3%)** had no win-rate at all — so the offline model is the sole voice rarely. But
+**131 of 1,614 (8%)** sat below the 200-game low-confidence threshold, and the heuristic keeps a
+third of the blend at *every* sample size by design, so on a 2,071-game card like Activated Golem it
+still moves the displayed score by ~7 points. See the open item on fading the model as n grows.
+
+**Class context can disagree with the pool by more than noise.** Activated Golem (JAIL_883): ALL
+bucket 52.2% drawn on 23,559 games (13.8% popularity), the drafted class's bucket 48.4% on 2,071.
+At that n the standard error is ~1.1pp, so a 3.8pp gap is ~3 SE — not obviously noise, but a
+single-class 4-day window is also where a meta artefact would look exactly like a class effect, and
+the two buckets are not independent (ALL contains the class). Not acted on.
+
 ## Known limitations
 
 1. Target = win-rate of the deck that includes the card: correlational, not causal (draft
