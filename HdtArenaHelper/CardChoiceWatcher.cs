@@ -4,6 +4,7 @@ using System.Linq;
 using HearthMirror;
 using HearthMirror.Enums;
 using HearthMirror.Objects;
+using Hearthstone_Deck_Tracker;
 
 namespace HdtArenaHelper
 {
@@ -50,15 +51,20 @@ namespace HdtArenaHelper
 		private readonly ChoiceGate _gate = new ChoiceGate(PollsBeforeGone);
 
 		/// <summary>
-		/// Consecutive empty polls before a choice counts as GONE. The client drops
-		/// <c>IsVisible</c> for a moment mid-choice, and clearing on the first empty poll reset the
-		/// dedup key, so the very same Discover was rendered again seconds later. Measured on a live
-		/// session: 8 of 35 in-game choices were exact repeats of the trio before them, four of those
-		/// within 6-12 seconds — the window this closes. The longer repeats are a different bug, a
-		/// list the client re-raises after the choice is over, and a debounce cannot fix that one.
+		/// Consecutive empty polls before a choice counts as GONE — one empty poll is not the end of a
+		/// choice, and clearing on it throws away the dedup key.
 		///
-		/// Three at a 500 ms poll is ~1.5 s of tolerance: far longer than a flicker, far shorter than
-		/// a player picking a card, so a genuinely new choice is never merged into the old one.
+		/// It does NOT fix the repeated-Discover bug, and the comment here used to claim it did.
+		/// Measured across two live sessions: 8 of 35 and then 14 of 37 in-game choices were exact
+		/// repeats of the trio before them, and the SHORTEST gap between a pair was 10 seconds, most
+		/// of them 30 s to 2 minutes. There is no sub-second flicker to absorb; those are the client
+		/// re-raising a list after the choice is over, and no debounce can tell that from a new
+		/// choice. Raising the threshold is not the answer either — at 10 s it would swallow two
+		/// genuine consecutive Discovers. The fix has to know the list is STALE, which is what the
+		/// setaside diagnostic on the log line is there to establish.
+		///
+		/// Three at a 500 ms poll is ~1.5 s: enough that a single missed read cannot end a choice,
+		/// short enough that a genuinely new one is never merged into the old.
 		/// </summary>
 		internal const int PollsBeforeGone = 3;
 
@@ -156,11 +162,19 @@ namespace HdtArenaHelper
 			// Dedup on the offered ids: unlike the draft's DraftChoices there is no Version field,
 			// and re-scoring the same Discover twice a second would re-run the synergy engine over
 			// the whole deck on the UI thread for nothing.
+			//
+			// A per-choice ID would be the right key — it would tell a list the client re-raises from
+			// a genuinely new Discover offering the same three cards — and there is not one to read.
+			// Checked, so nobody checks again: HearthMirror's CardChoices carries IsVisible and Cards
+			// and nothing else, HDT's HearthMirrorChoicesProvider returns that same object, and the
+			// IHsChoice that DOES carry an Id and a SourceEntityId lives inside the log reader's
+			// Battlegrounds path, reachable from no public member.
 			if(!_gate.Announce(plan.Signature))
 				return;
 
 			Log($"card choice: {plan.Args.OfferedDbfIds.Count} offered, " +
-				$"class={plan.Args.DeckClass}, deck={plan.Args.DeckDbfIds.Count}");
+				$"class={plan.Args.DeckClass}, deck={plan.Args.DeckDbfIds.Count}, " +
+				DescribeOwner(choices.Cards));
 			OnChoicesChanged?.Invoke(this, plan.Args);
 		}
 
@@ -168,6 +182,37 @@ namespace HdtArenaHelper
 		{
 			if(_gate.Miss())
 				OnChoicesGone?.Invoke(this, EventArgs.Empty);
+		}
+
+		/// <summary>
+		/// WHOSE choice this looks like, and whether it is still live — for the log and only for the
+		/// log, for now. A Discover puts its options into SETASIDE under the player who is choosing,
+		/// so counting the offered cards that are there right now, and under whom, separates a live
+		/// choice of ours from a list the client is merely still holding.
+		///
+		/// Logged rather than acted on. Gating the overlay on an unverified model of the client would
+		/// cost the whole in-game feature if the model is wrong, and the bug it would fix is a stale
+		/// panel for a few seconds; one live session with this line settles which way to go.
+		/// </summary>
+		private static string DescribeOwner(IEnumerable<string> offeredCardIds)
+		{
+			try
+			{
+				var ids = new HashSet<string>(offeredCardIds, StringComparer.OrdinalIgnoreCase);
+				var setAside = Core.Game.Entities.Values
+					.Where(e => e.IsInSetAside && !string.IsNullOrEmpty(e.CardId) && ids.Contains(e.CardId!))
+					.ToList();
+				if(setAside.Count == 0)
+					return "setaside=none";
+
+				var mine = setAside.Count(e => e.IsControlledBy(Core.Game.Player.Id));
+				return $"setaside={setAside.Count} mine={mine}";
+			}
+			catch
+			{
+				// The board is not always readable, and that is a fact to report rather than a failure.
+				return "setaside=unreadable";
+			}
 		}
 
 		/// <summary>What one poll resolved: the event to fire, plus the dedup key for it.</summary>

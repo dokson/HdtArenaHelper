@@ -54,6 +54,14 @@ namespace HdtArenaHelper
 		private readonly MulliganWatcher _mulliganWatcher = new MulliganWatcher();
 		// Deck-relative mulligan advice. No data source behind it by design — see DeckMulliganAdvisor.
 		private readonly IMulliganAdvisor _mulliganAdvisor = new DeckMulliganAdvisor();
+		// Current arena opponent's rank on Blizzard's own public leaderboard (first-party data, not
+		// scraped from a third party). LOG ONLY for now: there is no overlay row for this yet, because
+		// placing one needs a live-client screenshot to anchor against (see AGENTS.md — geometry is
+		// never guessed offline), the same reason DeckMechanics started log-only.
+		private readonly OpponentIdentityWatcher _opponentWatcher = new OpponentIdentityWatcher();
+		// NOT readonly: OnUnload disposes it to stop the crawl, so a re-enable needs a fresh one. It
+		// reloads its progress from disk, so nothing is re-crawled by replacing it.
+		private ArenaLeaderboardSource _leaderboard = new ArenaLeaderboardSource(CacheDir);
 		// Card map builds lazily on first use, so constructing at OnLoad (HearthDb may
 		// still be empty) is safe.
 		private readonly MetadataSynergyEngine _synergy = new MetadataSynergyEngine();
@@ -68,6 +76,8 @@ namespace HdtArenaHelper
 		private SelfUpdater? _updater;
 		private bool _autoUpdate = true;
 		private bool _autoUpdateLoaded;          // pref read lazily (menu can build before OnLoad)
+		private bool _leaderboardEnabled;        // opponent leaderboard lookup; default OFF, see the pref
+		private bool _leaderboardPrefLoaded;
 		private volatile bool _updatePending;   // a newer DLL was staged this session
 		private int _updateCheckRunning;         // Interlocked guard: one check in flight at a time
 		private MenuItem? _updateStatusItem;     // the submenu line reporting update state
@@ -90,7 +100,10 @@ namespace HdtArenaHelper
 		// ONE active screen, not four nullable fields: the screens are mutually exclusive, and the old
 		// shape maintained that in two places (every handler AND every render branch nulled the
 		// siblings), so missing one left a stale screen up.
-		private object? _activeScreen;   // DraftChoices | DeckReview | CardChoice | Mulligan event args
+		/// <summary>Which screen is showing and whether the overlay should be visible. Extracted into a pure
+		/// class because these rules produced four overlay bugs and none of them was testable in here — see
+		/// <see cref="OverlayState"/>.</summary>
+		private readonly OverlayState _overlayState = new OverlayState();
 		private object? _renderedScreen; // the instance the overlay was last built from
 		private bool _renderedReady;                 // data-ready state the overlay was built with
 		private int _renderedSources;                // LoadedSourceCount the overlay was built with
@@ -111,10 +124,19 @@ namespace HdtArenaHelper
 				_watcher.OnDeckReview += OnDeckReviewChanged;
 				_watcher.OnRunSummary += OnRunSummaryChanged;
 				_watcher.OnDraftEnded += OnDraftEnded;
+				_watcher.OnArenaScreenLeft += OnArenaScreenLeft;
+				_watcher.OnRunSummaryGone += OnRunSummaryGone;
 				_choiceWatcher.OnChoicesChanged += OnCardChoiceChanged;
 				_choiceWatcher.OnChoicesGone += OnCardChoiceGone;
 				_mulliganWatcher.OnMulligan += OnMulliganChanged;
 				_mulliganWatcher.OnMulliganGone += OnMulliganGone;
+				_opponentWatcher.OnOpponentIdentified += OnOpponentIdentified;
+				_opponentWatcher.OnOpponentGone += OnOpponentGone;
+				// A previous OnUnload disposed the old one to stop its crawl; a disposed source never
+				// crawls again, so re-enabling the plugin has to start from a live instance. Built
+				// regardless of the pref — nothing crawls until a lookup asks it to, and the pref is
+				// checked there.
+				RebuildLeaderboard();
 
 				// Clear watcher + pick/render state so a stale pick can't bleed in.
 				ResetDraftState();
@@ -159,13 +181,20 @@ namespace HdtArenaHelper
 			_watcher.OnDeckReview -= OnDeckReviewChanged;
 			_watcher.OnRunSummary -= OnRunSummaryChanged;
 			_watcher.OnDraftEnded -= OnDraftEnded;
+			_watcher.OnArenaScreenLeft -= OnArenaScreenLeft;
+			_watcher.OnRunSummaryGone -= OnRunSummaryGone;
 			_choiceWatcher.OnChoicesChanged -= OnCardChoiceChanged;
 			_choiceWatcher.OnChoicesGone -= OnCardChoiceGone;
 			_mulliganWatcher.OnMulligan -= OnMulliganChanged;
 			_mulliganWatcher.OnMulliganGone -= OnMulliganGone;
+			_opponentWatcher.OnOpponentIdentified -= OnOpponentIdentified;
+			_opponentWatcher.OnOpponentGone -= OnOpponentGone;
 			// Abandon any in-flight update check before the DLL stops being ours to swap.
 			try { _updateCts?.Cancel(); }
 			catch(Exception ex) { Log.Error("[ArenaHelper] update cancel failed: " + ex.Message); }
+			// The leaderboard crawl never terminates on its own, so an uncancelled one would keep
+			// hitting Blizzard and writing cache files for a plugin the user has just disabled.
+			_leaderboard.Dispose();
 			RestoreNativeArenaOverlay();
 			_overlay?.Close();
 			_overlay = null;
@@ -187,9 +216,32 @@ namespace HdtArenaHelper
 				_watcher.Poll(); // fires OnChoicesChanged / OnDeckReview / OnDraftEnded on this thread
 				_choiceWatcher.Poll(); // fires OnCardChoiceChanged / OnCardChoiceGone on this thread
 				_mulliganWatcher.Poll(); // fires OnMulliganChanged / OnMulliganGone on this thread
+				_opponentWatcher.Poll(); // fires OnOpponentIdentified / OnOpponentGone on this thread
+				PollLocalArenaRating();
 
-				var screen = _activeScreen;
-				var want = _dataReady && screen != null;
+				var screen = _overlayState.ActiveScreen;
+				// Render dedup is DERIVED from there being no screen rather than reset by each teardown: the
+				// old per-teardown reset had to be repeated in every clear path, and a path that forgot it
+				// left the panel frozen when the same screen came back and compared equal by reference.
+				//
+				// The CONTENT is cleared here too, and that is not cosmetic. The overlay used to rely on being
+				// HIDDEN to make stale drawing invisible; now that the standings panel can keep the window
+				// visible through a whole match, a finished Discover's three plaques stayed on the board.
+				// Derived from the same condition, so no teardown path can forget it.
+				if(screen == null && _renderedScreen != null)
+				{
+					_renderedScreen = null;
+					_overlay?.ClearScreenContent();
+				}
+				// The standings panel is a second reason to be visible, because during a match there is no
+				// "screen" of ours at all outside a mulligan or a Discover — and the opponent's rank belongs
+				// on screen for the whole game.
+				//
+				// This widens the rule that produced three ghost overlays, so it is gated by construction
+				// rather than by a new check: the match-standings flag is set ONLY from OnOpponentIdentified,
+				// which fires solely inside an arena match, and cleared from OnOpponentGone. It cannot outlive
+				// the match that set it, which is what the previous ghosts all did.
+				var want = _overlayState.WantVisible(_dataReady);
 
 				// (Re)build the overlay when the screen changes OR when another data source
 				// has come online since the last render (the heuristic is loaded instantly,
@@ -367,11 +419,17 @@ namespace HdtArenaHelper
 					{
 						ResetDraftState();            // don't resurrect a stale pick from a previous run
 						SuppressNativeArenaOverlay(); // take over from HDT's built-in overlay
+						RebuildLeaderboard();
 					}
 					else
 					{
 						RestoreNativeArenaOverlay();  // hand the arena overlay back to HDT
 						_overlay?.UpdateVisibility(false);
+						// Disabling the plugin has to stop the crawl too. Without this the lookups go
+						// quiet but the crawl keeps pulling pages from Blizzard and rewriting the cache
+						// for the rest of the process — the exact harm OnUnload's Dispose exists to
+						// prevent, and the reason this feature defaults to off.
+						_leaderboard.Dispose();
 					}
 				};
 				_menuItem.Items.Add(toggle);
@@ -379,6 +437,31 @@ namespace HdtArenaHelper
 				var refresh = new MenuItem { Header = "Refresh data now" };
 				refresh.Click += (_, __) => OnButtonPress();
 				_menuItem.Items.Add(refresh);
+
+				// Read the pref before building the checkbox, for the same reason auto-update does:
+				// the menu can be built before OnLoad, and a checkbox showing the default instead of
+				// the saved choice is a lie about what the plugin is doing.
+				EnsureLeaderboardPref();
+				var leaderboard = new MenuItem
+				{
+					Header = "Opponent leaderboard rank",
+					IsCheckable = true,
+					IsChecked = _leaderboardEnabled
+				};
+				leaderboard.Click += (_, __) =>
+				{
+					_leaderboardEnabled = leaderboard.IsChecked;
+					SaveLeaderboardPref(_leaderboardEnabled);
+					Log.Info($"[ArenaHelper] opponent leaderboard = {_leaderboardEnabled}");
+					if(_leaderboardEnabled)
+						// A disposed source never crawls again, so turning this back on needs a live one.
+						RebuildLeaderboard();
+					else
+						// Stop the crawl NOW, not at the next unload: switching it off is exactly a
+						// request to stop using someone else's bandwidth.
+						_leaderboard.Dispose();
+				};
+				_menuItem.Items.Add(leaderboard);
 
 				_menuItem.Items.Add(new Separator());
 
@@ -563,6 +646,65 @@ namespace HdtArenaHelper
 				menu.Dispatcher.BeginInvoke((Action)Apply);
 		}
 
+		/// <summary>
+		/// Replaces the leaderboard source with a live one. A disposed source never crawls again, so every
+		/// re-enable path needs this. Guarded because the constructor creates a directory: an IOException
+		/// from a WPF menu handler is an unhandled DISPATCHER exception, which takes HDT down rather than
+		/// counting toward the OnUpdate limit.
+		/// </summary>
+		private void RebuildLeaderboard()
+		{
+			try
+			{
+				_leaderboard = new ArenaLeaderboardSource(CacheDir);
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] leaderboard source could not be created: " + ex.Message);
+			}
+		}
+
+		private string LeaderboardPrefFile => Path.Combine(CacheDir, "leaderboard.pref");
+
+		private void EnsureLeaderboardPref()
+		{
+			if(_leaderboardPrefLoaded)
+				return;
+			_leaderboardPrefLoaded = true;
+			_leaderboardEnabled = LoadLeaderboardPref();
+		}
+
+		private bool LoadLeaderboardPref()
+		{
+			try
+			{
+				if(File.Exists(LeaderboardPrefFile)
+					&& bool.TryParse(File.ReadAllText(LeaderboardPrefFile).Trim(), out var v))
+					return v;
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] leaderboard pref read failed: " + ex.Message);
+			}
+			// Default OFF, unlike auto-update. The crawl is CONTINUOUS background traffic against
+			// Blizzard's own site for as long as HDT runs, and today the result only reaches the log —
+			// there is no overlay row yet. Nobody's bandwidth should pay for that without asking.
+			return false;
+		}
+
+		private void SaveLeaderboardPref(bool value)
+		{
+			try
+			{
+				Directory.CreateDirectory(CacheDir);
+				File.WriteAllText(LeaderboardPrefFile, value ? "true" : "false");
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] leaderboard pref write failed: " + ex.Message);
+			}
+		}
+
 		private string AutoUpdatePrefFile => Path.Combine(CacheDir, "auto_update.pref");
 
 		private bool LoadAutoUpdatePref()
@@ -601,7 +743,8 @@ namespace HdtArenaHelper
 			_watcher.Reset();
 			_choiceWatcher.Reset();
 			_mulliganWatcher.Reset();
-			_activeScreen = null;
+			_opponentWatcher.Reset();
+			_overlayState.Reset();
 			_renderedScreen = null;
 			_renderedReady = false;
 			_renderedSources = 0;
@@ -610,12 +753,236 @@ namespace HdtArenaHelper
 		private void OnChoicesChanged(object sender, DraftChoicesEventArgs e)
 		{
 			// One field, so a pick REPLACES a deck-edit rather than having to remember to clear it.
-			_activeScreen = e;
+			_overlayState.Show(e);
 			Log.Info($"[ArenaHelper] choices changed: {e.Offered.Count} offered, " +
 				$"{e.DraftedDbfIds.Count} drafted, underground={e.IsUnderground}");
 		}
 
-		private void OnRunSummaryChanged(object sender, RunSummaryEventArgs e) => _activeScreen = e;
+		private void OnRunSummaryChanged(object sender, RunSummaryEventArgs e)
+		{
+			_overlayState.Show(e);
+			LogLocalArenaRating();
+			StartLeaderboardCrawlForArenaScreen(e.IsUnderground);
+		}
+
+		/// <summary>
+		/// Being on an arena screen is DEMAND, and an earlier signal than an opponent sighting: the crawl
+		/// gets a head start over drafting or reviewing a run instead of beginning when a rank is already
+		/// wanted. It does not weaken the rule that traffic follows demand rather than HDT's uptime — the
+		/// activity window still stops the crawl once the player leaves arena alone.
+		///
+		/// Which board is decided by the screen, not guessed: an Underground run must not seed the Normal
+		/// Arena crawl, since only one board is crawled per client at a time.
+		/// </summary>
+		private void StartLeaderboardCrawlForArenaScreen(bool isUnderground)
+		{
+			try
+			{
+				EnsureLeaderboardPref();
+				if(!_leaderboardEnabled)
+				{
+					LogCrawlGate("leaderboard disabled in the plugin menu");
+					return;
+				}
+				var region = LeaderboardRegion();
+				if(region == null)
+				{
+					LogCrawlGate($"region not supported for the leaderboard ({Core.Game?.CurrentRegion})");
+					return;
+				}
+				var kind = isUnderground ? ArenaLeaderboardKind.UndergroundArena : ArenaLeaderboardKind.Arena;
+				LogCrawlGate($"arena screen ({kind}, {region}); crawl requested");
+				_leaderboard.EnsureCrawling(kind, region);
+				LogOwnLeaderboardPlace(kind, region);
+			}
+			catch(Exception ex)
+			{
+				// Never onto the UI thread: this runs from OnUpdate, and HDT disables a plugin after 100
+				// exceptions there.
+				Log.Error("[ArenaHelper] leaderboard crawl could not be started: " + ex);
+			}
+		}
+
+		// Last pair logged, so this reports on CHANGE rather than on every poll.
+		private (int Rating, int Underground)? _lastRatingLogged;
+		private string? _lastOwnPlaceLogged;
+		private bool _ratingNullLogged;
+		private string? _lastCrawlGateLogged;
+
+		private DateTime _nextRatingReadUtc = DateTime.MinValue;
+
+		/// <summary>
+		/// Re-reads the rating on a slow cadence WHILE one of our arena screens is up, and not otherwise.
+		///
+		/// It keeps reading rather than stopping at the first success, deliberately: the rating MOVES after
+		/// a match, and that movement is the whole basis of a per-match delta — a one-shot read would make
+		/// that impossible. Retrying is also required rather than optional, because
+		/// <c>GetArenaRatingInfo()</c> returns null INTERMITTENTLY (verified live: null on one screen, real
+		/// values ~35 minutes later on the same screen), so a single read loses it for the session.
+		///
+		/// But it is GATED on an active arena screen. Mono memory reads are not free — that is why the
+		/// watchers poll at 500 ms rather than faster — and an ungated read went on twice a minute at the
+		/// main menu and inside Battlegrounds, where nothing can consume it. Same principle the crawl
+		/// follows: do the work where it can pay off.
+		/// </summary>
+		private void PollLocalArenaRating()
+		{
+			if(_overlayState.ActiveScreen == null)
+				return;
+			var now = DateTime.UtcNow;
+			if(now < _nextRatingReadUtc)
+				return;
+			_nextRatingReadUtc = now + TimeSpan.FromSeconds(10);
+			LogLocalArenaRating();
+			RefreshOwnStandingsPanel();
+		}
+
+		// The own-standings line last put on screen, so the panel is rebuilt only when it actually changes.
+		private string? _shownOwnStandings;
+
+		/// <summary>
+		/// Rebuilds the standings panel when its content changes, rather than only when a screen is rendered.
+		///
+		/// Both halves of it are read too early to be right the first time, and neither corrected itself:
+		/// `GetArenaRatingInfo()` returns null INTERMITTENTLY, so a panel built at render time simply had no
+		/// line and never got one; and the leaderboard cache is loaded on a background thread, so a place
+		/// looked up immediately after starting the crawl reported "the crawl has not finished a pass" over a
+		/// cache that was about to arrive with a completed one. A render-time-only build cannot fix either,
+		/// because the screen does not change again.
+		///
+		/// Left alone during a match: there the panel also carries the opponent, and rebuilding it from here
+		/// would drop that half.
+		/// </summary>
+		private void RefreshOwnStandingsPanel()
+		{
+			// IN A MATCH the same re-resolution is needed, and for a sharper reason: restarting HDT mid-game
+			// re-identifies the opponent at a moment when neither the region nor the rating is readable yet,
+			// so the panel was computed empty and — the opponent being deduped by name — never recomputed.
+			// The same "built once, too early" failure as on the run screen, one screen over.
+			if(_overlayState.MatchStandings)
+			{
+				if(_matchOpponent != null)
+					ShowMatchStandings(_matchUnderground, _matchOpponent, force: false);
+				return;
+			}
+			if(!(_overlayState.ActiveScreen is RunSummaryEventArgs run))
+				return;
+			var line = BuildOwnRatingLine(run.IsUnderground);
+			if(line == _shownOwnStandings)
+				return;
+			_shownOwnStandings = line;
+			_overlay?.SetOwnRating(line);
+		}
+
+		/// <summary>One line per distinct state, so a crawl that does not start says WHY. This path is
+		/// polled, so an unconditional log would repeat twice a second.</summary>
+		private void LogCrawlGate(string state)
+		{
+			if(_lastCrawlGateLogged == state)
+				return;
+			_lastCrawlGateLogged = state;
+			Log.Info("[ArenaHelper] leaderboard: " + state);
+		}
+
+		/// <summary>
+		/// The player's OWN place on the board, from the same cache the opponent lookup uses. Reported only
+		/// once per state, since this runs off a polled screen.
+		///
+		/// Absence here means strictly less than it sounds, and the wording says so: measured live, a
+		/// rating comfortably above the board's eligibility threshold was still not listed, so something
+		/// beyond rating decides admission (REPORT.md 17). "Not listed" is therefore not "below the cutoff",
+		/// and this must never be phrased as a verdict on how good the player is.
+		/// </summary>
+		private void LogOwnLeaderboardPlace(ArenaLeaderboardKind kind, string region)
+		{
+			string? name = null;
+			try
+			{
+				// GetBattleTag() and NOT MatchInfo.LocalPlayer: verified live that MatchInfo is populated
+				// only inside a match, so reading the name from there reported "not readable" on exactly
+				// the screen this feature is for. MatchInfo stays as a fallback.
+				name = HearthMirror.Reflection.Client.GetBattleTag()?.Name
+					?? HearthMirror.Reflection.Client.GetMatchInfo()?.LocalPlayer?.BattleTag?.Name;
+			}
+			catch(Exception ex)
+			{
+				Log.Info("[ArenaHelper] own battletag unavailable: " + ex.Message);
+			}
+			if(string.IsNullOrWhiteSpace(name))
+			{
+				LogCrawlGate("own battletag not readable yet; cannot look your own place up");
+				return;
+			}
+
+			var found = _leaderboard.FindAll(kind, region, name!);
+			string message;
+			if(found.Count > 0)
+			{
+				message = $"[ArenaHelper] you ('{name}') on the {kind} {region} leaderboard: " +
+					string.Join(" | ", found.Select(x => $"rank #{x.Rank}, {Metric(kind, x.Rating)}"));
+			}
+			else if(_leaderboard.HasCompletedPass(kind, region))
+			{
+				// A full pass HAS been read, so "absent" is a fact about the board rather than about how
+				// far the crawl got. Still not a statement about the player: a listing needs a seasonal
+				// minimum of games, so a perfectly good rating can be missing from it.
+				message = $"[ArenaHelper] you ('{name}') are not on the {kind} {region} leaderboard — the " +
+					"whole board has been read, and a listing also requires a seasonal minimum of games, " +
+					"so this says nothing about your rating";
+			}
+			else
+			{
+				message = $"[ArenaHelper] you ('{name}') not found on the {kind} {region} leaderboard yet — " +
+					"the crawl has not finished a full pass, so your page may simply not have been read";
+			}
+			if(_lastOwnPlaceLogged == message)
+				return;
+			_lastOwnPlaceLogged = message;
+			Log.Info(message);
+		}
+
+		/// <summary>
+		/// Logs the local player's own arena ratings, EXACTLY as the client states them — no scaling, no
+		/// arithmetic. This needs no leaderboard and no network at all: unlike an opponent's standing, your
+		/// own rating is readable straight from the client, so it works for every player rather than only
+		/// for the few thousand a regional board publishes.
+		///
+		/// It is also the measurement REPORT.md 17 says is missing. The relationship between these integers
+		/// and what the leaderboards publish is NOT established — Normal Arena publishes average wins per
+		/// run as a decimal, while Underground publishes an integer in the thousands — so the two must not
+		/// be shown in the same units until a live reading settles which is which. Logging both raw is what
+		/// settles it.
+		/// </summary>
+		private void LogLocalArenaRating()
+		{
+			try
+			{
+				var info = HearthMirror.Reflection.Client.GetArenaRatingInfo();
+				if(info == null)
+				{
+					// Logged, not swallowed: a silent return here is indistinguishable from the feature
+					// being absent, which cost a diagnosis once already.
+					if(!_ratingNullLogged)
+					{
+						_ratingNullLogged = true;
+						Log.Info("[ArenaHelper] local arena rating: client returned nothing (reported once)");
+					}
+					return;
+				}
+				_ratingNullLogged = false;
+				var pair = (info.Rating, info.UndergroundRating);
+				if(_lastRatingLogged == pair)
+					return;
+				_lastRatingLogged = pair;
+				Log.Info($"[ArenaHelper] local arena rating (raw, unscaled): Rating={info.Rating}, " +
+					$"UndergroundRating={info.UndergroundRating}");
+			}
+			catch(Exception ex)
+			{
+				// Unreadable is the normal case outside a session, so this stays quiet rather than noisy.
+				Log.Info("[ArenaHelper] local arena rating unavailable: " + ex.Message);
+			}
+		}
 
 		/// <summary>
 		/// Describes the finished run deck on the screen between matches. Descriptive only — counts the
@@ -627,11 +994,86 @@ namespace HdtArenaHelper
 			var mechanics = DeckMechanics.Describe(e.DeckDbfIds);
 			Log.Info($"[ArenaHelper] run summary: {mechanics.ToLine()}");
 			_overlay?.SetRunSummary(mechanics, e.DraftClass.ToString(), e.Wins, e.Losses);
+			// A panel of its own, so it neither depends on the deck stats nor disappears with them. Set here
+			// AND refreshed from the poll: the rating can be unreadable at this instant and the leaderboard
+			// cache can still be loading, and the screen does not change again to give a second chance.
+			_shownOwnStandings = BuildOwnRatingLine(e.IsUnderground);
+			_overlay?.SetOwnRating(_shownOwnStandings);
+		}
+
+		/// <summary>
+		/// The player's own standing, for the row above the deck stats: their rating as the client states it,
+		/// plus — when they are not listed — the rank they WOULD enter at.
+		///
+		/// The projection is a count over the already-cached board, so it costs no request. It is offered for
+		/// **Underground only** — not because the client's two rating fields differ, they do not, but because
+		/// the BOARDS do: Underground publishes that same rating (verified live to match exactly), while the
+		/// Normal Arena board publishes average wins per run, and placing a rating on a board sorted by
+		/// average wins would be an invented number (REPORT.md §17).
+		///
+		/// Returns null rather than a placeholder when there is nothing solid to say — an empty row is
+		/// better than a confident wrong one.
+		/// </summary>
+		private string? BuildOwnRatingLine(bool isUnderground)
+		{
+			int rating;
+			try
+			{
+				var info = HearthMirror.Reflection.Client.GetArenaRatingInfo();
+				if(info == null)
+					return null;
+				rating = isUnderground ? info.UndergroundRating : info.Rating;
+			}
+			catch(Exception ex)
+			{
+				Log.Info("[ArenaHelper] own rating unavailable for the overlay: " + ex.Message);
+				return null;
+			}
+			if(rating <= 0)
+				return null;
+
+			var label = isUnderground ? "Underground" : "Arena";
+			var line = $"{label} rating {rating}";
+			if(!isUnderground)
+				return line; // no comparable board column, so nothing further can be said honestly
+
+			var region = LeaderboardRegion();
+			if(region == null || !_leaderboardEnabled)
+				return line;
+
+			var kind = ArenaLeaderboardKind.UndergroundArena;
+			var name = OwnBattleTagName();
+			if(name != null)
+			{
+				// FindAll is ordered best rank first, and a shared display name can hold several players —
+				// so this is "the best standing published under your name", not necessarily yours.
+				var listed = _leaderboard.FindAll(kind, region, name);
+				if(listed.Count > 0)
+					return $"{line}   ·   rank #{listed[0].Rank}";
+			}
+
+			var projected = _leaderboard.ProjectedRankFor(kind, region, rating);
+			// "would enter at" and never "your rank": a placing also needs a seasonal minimum of games, so
+			// this is where the rating puts you, not a position you hold.
+			return projected == null ? line : $"{line}   ·   would enter ~#{projected}";
+		}
+
+		private string? OwnBattleTagName()
+		{
+			try
+			{
+				return HearthMirror.Reflection.Client.GetBattleTag()?.Name
+					?? HearthMirror.Reflection.Client.GetMatchInfo()?.LocalPlayer?.BattleTag?.Name;
+			}
+			catch(Exception)
+			{
+				return null;
+			}
 		}
 
 		private void OnDeckReviewChanged(object sender, DeckReviewEventArgs e)
 		{
-			_activeScreen = e;
+			_overlayState.Show(e);
 			Log.Info($"[ArenaHelper] deck review: {e.Deck.Count} cards, " +
 				$"class={e.DraftClass}, underground={e.IsUnderground}");
 
@@ -647,11 +1089,48 @@ namespace HdtArenaHelper
 			Log.Info($"[ArenaHelper] deck mechanics: {DeckMechanics.Describe(expanded).ToLine()}");
 		}
 
+		/// <summary>
+		/// The draft PICK/REVIEW panel is gone. This is NOT "the arena screen is gone": `EndDraft` is also
+		/// raised on transitions that happen while the player stays in arena (a redraft trimmed back to 30,
+		/// a session state that is no longer a real pick), so the run summary must SURVIVE it.
+		///
+		/// Clearing the run summary here was tried and reverted: the watcher dedups, so once the panel was
+		/// dropped it was never raised again and the run summary vanished for the rest of the arena screen.
+		/// The ghost-overlay problem it was meant to fix is real, but its cause is that visibility has no
+		/// scene check — see <see cref="OnArenaScreenLeft"/>.
+		/// </summary>
 		private void OnDraftEnded(object sender, EventArgs e)
 		{
-			ClearScreen<DraftChoicesEventArgs>();
-			ClearScreen<DeckReviewEventArgs>();
+			_overlayState.DraftEnded();
 			Log.Info("[ArenaHelper] draft ended");
+		}
+
+		/// <summary>
+		/// The client has left the arena screens, so EVERY screen those raise must go — including the run
+		/// summary, which deliberately survives <see cref="OnDraftEnded"/>.
+		///
+		/// This exists because overlay visibility is driven purely by whether a screen is active, with **no
+		/// scene or game-type check at render time**: a screen left set outlives what it describes, and the
+		/// arena run panel ended up sitting on top of a live Battlegrounds Duo game. That is the fourth
+		/// ghost overlay in this project, and the log signature to recognise it is a `draft ended` with no
+		/// `overlay hidden` after it. Any new screen kind raised from an arena screen belongs here too.
+		/// </summary>
+		/// <summary>The run screen stopped being reported while the player may still be in arena — switching
+		/// to a mode with no run in progress is the case that needs this, and without it the previous mode's
+		/// panel stayed on screen.</summary>
+		private void OnRunSummaryGone(object sender, EventArgs e)
+		{
+			_overlayState.RunSummaryGone();
+			// Its own layer means its own teardown: the deck-stats reset no longer clears it for us.
+			_overlay?.SetOwnRating(null);
+			Log.Info("[ArenaHelper] run screen gone; panel dropped");
+		}
+
+		private void OnArenaScreenLeft(object sender, EventArgs e)
+		{
+			_overlayState.ArenaScreenLeft();
+			_overlay?.SetOwnRating(null);
+			Log.Info("[ArenaHelper] arena screens left; panels dropped");
 		}
 
 		/// <summary>
@@ -673,14 +1152,14 @@ namespace HdtArenaHelper
 			return $"[{parts}]{syn}";
 		}
 
-		private void OnCardChoiceChanged(object sender, CardChoiceEventArgs e) => _activeScreen = e;
+		private void OnCardChoiceChanged(object sender, CardChoiceEventArgs e) => _overlayState.Show(e);
 
 		private void OnCardChoiceGone(object sender, EventArgs e)
-			=> ClearScreen<CardChoiceEventArgs>();
+			=> _overlayState.Clear<CardChoiceEventArgs>();
 
 		private void OnMulliganChanged(object sender, MulliganEventArgs e)
 		{
-			_activeScreen = e;
+			_overlayState.Show(e);
 			LogOpponentHeroPower();
 		}
 
@@ -734,21 +1213,191 @@ namespace HdtArenaHelper
 				+ $"2 health={HeroPowerThreat.KillsForFree(card, 2)}");
 		}
 
-		private void OnMulliganGone(object sender, EventArgs e) => ClearScreen<MulliganEventArgs>();
+		private void OnMulliganGone(object sender, EventArgs e) => _overlayState.Clear<MulliganEventArgs>();
 
 		/// <summary>
-		/// Drop the active screen only if it is still the KIND that just ended. Without the type
-		/// check, the draft watcher leaving the DRAFT scene would also wipe a mulligan that the
-		/// in-game watcher had just put up — the two watchers run on the same tick and each only
-		/// speaks for its own screens.
+		/// Looks the opponent up on Blizzard's own arena leaderboard and logs whatever comes back.
+		/// LOG ONLY — see the field comment on <see cref="_leaderboard"/> for why there is no overlay
+		/// row yet. Most opponents will not resolve: the leaderboard covers roughly the top 10,000
+		/// players per region, and a lookup this project's own client has never crawled that far into
+		/// reports nothing rather than guessing.
 		/// </summary>
-		private void ClearScreen<T>() where T : class
+		private void OnOpponentIdentified(object sender, OpponentIdentityEventArgs e)
 		{
-			if(!(_activeScreen is T))
-				return;
-			_activeScreen = null;
-			_renderedScreen = null;
+			// Wrapped HERE and not left to the watcher: GameWatcher.Poll's catch would report a
+			// leaderboard fault as "client read unavailable", i.e. blame Hearthstone, once per streak and
+			// then go quiet. This feature's only output today IS the log, so a misattributed line there
+			// costs the whole diagnosis.
+			try
+			{
+				LookUpOpponentRank(e.BattleTagName);
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] leaderboard lookup failed: " + ex);
+			}
 		}
+
+		private void LookUpOpponentRank(string battleTagName)
+		{
+			var e = new OpponentIdentityEventArgs(battleTagName);
+			// The whole feature is opt-in: with it off, nothing is looked up and — more to the point —
+			// no crawl is ever started, so the plugin makes no leaderboard traffic at all.
+			// Read outside the pref gate: this is the local player's own rating from the client, with no
+			// network involved, so the leaderboard preference has no bearing on it.
+			LogLocalArenaRating();
+
+			var underground = IsUndergroundMatch();
+
+			// The panel is put up FIRST, with the opponent's name, and then re-resolved by the poll. Every
+			// gate below can be temporarily false on a mid-match restart — an unmapped region, an unloaded
+			// cache — and returning early used to leave the panel empty for the rest of the game.
+			ShowMatchStandings(underground, battleTagName);
+
+			EnsureLeaderboardPref();
+			if(!_leaderboardEnabled)
+				return;
+
+			var region = LeaderboardRegion();
+			if(region == null)
+			{
+				Log.Info($"[ArenaHelper] opponent '{e.BattleTagName}': region not mapped for the leaderboard yet");
+				return;
+			}
+
+			var kind = underground ? ArenaLeaderboardKind.UndergroundArena : ArenaLeaderboardKind.Arena;
+
+			_leaderboard.EnsureCrawling(kind, region);
+			var found = _leaderboard.FindAll(kind, region, e.BattleTagName);
+			if(found.Count == 0)
+			{
+				Log.Info($"[ArenaHelper] opponent '{e.BattleTagName}' ({region}, {kind}): not on leaderboard (or not yet crawled)");
+				return; // the panel already says so, and says "checking" until a full pass has been read
+			}
+
+			// ALL of them, best rank first. A display name has no discriminator on the leaderboard, so it
+			// can belong to several players; naming one as the opponent would state a real rank under the
+			// wrong player's name. Presented as the alternatives they are, never as a single fact.
+			var standings = string.Join(" | ", found.Select(x => $"rank #{x.Rank}, {Metric(kind, x.Rating)}"));
+			var shared = found.Count > 1 ? $" [{found.Count} players share this display name]" : string.Empty;
+			Log.Info($"[ArenaHelper] opponent '{e.BattleTagName}' ({region}, {kind}): {standings}{shared}");
+
+			// The panel is refreshed rather than told what to say: BuildOpponentLine renders the same rule
+			// (best rank first, the count when a name is shared, never one rank asserted as certainly
+			// theirs), and having one place decide it keeps the log and the screen from drifting apart.
+			ShowMatchStandings(underground, battleTagName);
+		}
+
+		/// <summary>Keeps a long BattleTag from pushing the panel across the board.</summary>
+		private static string Shorten(string name)
+			=> name.Length <= 14 ? name : name.Substring(0, 13) + "…";
+
+		/// <summary>
+		/// Puts the standings panel into MATCH mode: your line, and the opponent's beside it. Setting this is
+		/// what keeps the overlay visible outside our own screens, and it is reachable only from the
+		/// arena-match-gated opponent watcher — see the visibility rule in <see cref="OnUpdate"/>.
+		/// </summary>
+		private void ShowMatchStandings(bool underground, string? opponentName, bool force = true)
+		{
+			_overlayState.OpponentIdentified();
+			_matchOpponent = opponentName;
+			_matchUnderground = underground;
+
+			// Re-resolved on every call rather than captured once: on a mid-match restart the region and the
+			// client's rating are both briefly unreadable, and the opponent is deduped by name, so this is
+			// the only thing that gets a second chance at either.
+			var own = BuildOwnRatingLine(underground);
+			var opponent = opponentName == null ? null : BuildOpponentLine(underground, opponentName);
+			var key = string.Concat(own, "", opponent);
+			if(!force && key == _shownMatchStandings)
+				return;
+			_shownMatchStandings = key;
+			_overlay?.SetStandings(own, opponent);
+		}
+
+		// The match's opponent, kept so the panel can be recomputed while the numbers behind it settle.
+		private string? _matchOpponent;
+		private bool _matchUnderground;
+		private string? _shownMatchStandings;
+
+		/// <summary>
+		/// The opponent's half of the standings panel, or null when there is nothing honest to put there yet.
+		/// A region we cannot map and a board we have not finished reading are both "not yet", NOT
+		/// "not listed" — and the difference matters, because a listing also needs a seasonal minimum of
+		/// games, so "not listed" already says less than it appears to.
+		/// </summary>
+		private string? BuildOpponentLine(bool underground, string name)
+		{
+			EnsureLeaderboardPref();
+			if(!_leaderboardEnabled)
+				return null;
+			var region = LeaderboardRegion();
+			if(region == null)
+				return null;
+
+			var kind = underground ? ArenaLeaderboardKind.UndergroundArena : ArenaLeaderboardKind.Arena;
+			var found = _leaderboard.FindAll(kind, region, name);
+			if(found.Count == 0)
+			{
+				return _leaderboard.HasCompletedPass(kind, region)
+					? $"opponent {Shorten(name)}: not listed"
+					: $"opponent {Shorten(name)}: checking";
+			}
+			return found.Count > 1
+				? $"opponent {Shorten(name)}: #{found[0].Rank} or lower ({found.Count} share this name)"
+				: $"opponent {Shorten(name)}: #{found[0].Rank}, {Metric(kind, found[0].Rating)}";
+		}
+
+		/// <summary>Printed exactly as the feed reports it. The Underground column has no documented
+		/// scale, so dividing it — by 100, say, which its four-digit values invite — would state a number
+		/// Blizzard never published.</summary>
+		private static string Metric(ArenaLeaderboardKind kind, double rating)
+			=> kind == ArenaLeaderboardKind.Arena ? $"{rating:0.##} avg wins" : $"{rating:0.##} rating";
+
+		private void OnOpponentGone(object sender, EventArgs e)
+		{
+			if(!_overlayState.MatchStandings)
+				return;
+			_overlayState.OpponentGone();
+			_overlay?.SetStandings(null, null);
+			Log.Info("[ArenaHelper] opponent gone; standings panel dropped");
+		}
+
+		/// <summary>Is the current match Underground Arena rather than Normal Arena? Both variants
+		/// (including the vs-AI ones) are already known-arena by the time this runs — <see cref="OpponentIdentityWatcher"/>
+		/// is <c>ArenaMatchOnly</c> — so only the underground/normal distinction is left to make.</summary>
+		private static bool IsUndergroundMatch()
+		{
+			try
+			{
+				var gameType = (HearthDb.Enums.GameType)HearthMirror.Reflection.Client.GetGameType();
+				return gameType == HearthDb.Enums.GameType.GT_UNDERGROUND_ARENA
+					|| gameType == HearthDb.Enums.GameType.GT_UNDERGROUND_ARENA_PLAYER_VS_AI;
+			}
+			catch(Exception ex)
+			{
+				Log.Error("[ArenaHelper] could not read game type: " + ex.Message);
+				return false;
+			}
+		}
+
+		/// <summary>
+		/// Maps HDT's own region enum to the region codes Blizzard's leaderboard accepts. CHINA is
+		/// deliberately excluded: the leaderboard endpoint silently falls back to the SAME rows an
+		/// unrecognized region string gets, so querying it would show a real rank under the wrong
+		/// player's name rather than nothing (verified against the live endpoint).
+		/// </summary>
+		private static string? LeaderboardRegion()
+		{
+			switch(Core.Game?.CurrentRegion)
+			{
+				case Hearthstone_Deck_Tracker.Enums.Region.US: return "US";
+				case Hearthstone_Deck_Tracker.Enums.Region.EU: return "EU";
+				case Hearthstone_Deck_Tracker.Enums.Region.ASIA: return "AP";
+				default: return null;
+			}
+		}
+
 
 		/// <summary>Render whichever screen is active. One place where the four kinds are named.</summary>
 		private void RenderScreen(object screen)

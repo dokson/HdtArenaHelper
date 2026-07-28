@@ -146,6 +146,10 @@ namespace HdtArenaHelper
 		// Canvas: WPF alignment re-anchors its child on every resize by itself, where Canvas coords
 		// would go stale until the next render call.
 		private readonly Grid _cornerLayer;
+		/// <summary>A layer of its own for the standings panel, so it is independent of the deck-stats panel
+		/// in both lifetime and placement — <see cref="SetRunSummary"/> clears <see cref="_cornerLayer"/> as
+		/// its reset, which would otherwise wipe whichever of the two was set first.</summary>
+		private readonly Grid _ratingLayer;
 		private bool _nativePlaqueUnavailable;
 		private bool _shownOnce;
 		private bool _visible;   // our own show/hide state, so the transition is loggable
@@ -176,9 +180,15 @@ namespace HdtArenaHelper
 			// Root grid: the plaque Viewbox (centred 4:3) plus a window-filling layer for
 			// edge-anchored UI that must reach the true window edge, not the letterbox inset.
 			_cornerLayer = new Grid();
+			// The standings panel gets a layer of its OWN, not a slot in _cornerLayer: SetRunSummary
+			// clears that layer as its "new screen" reset, so a panel living there would be wiped by
+			// whichever call happened to come second. Separate layers make the two independent of
+			// ordering, which is what "two independent panels" has to mean to be safe.
+			_ratingLayer = new Grid();
 			var root = new Grid();
 			root.Children.Add(viewbox);
 			root.Children.Add(_cornerLayer);
+			root.Children.Add(_ratingLayer);
 			Content = root;
 
 			Loaded += (_, __) => MakeClickThrough();
@@ -187,7 +197,11 @@ namespace HdtArenaHelper
 			// client of 0x0 and stayed there, because the watcher dedups and never asked again.
 			// Re-anchoring on every size change fixes both halves — the first, too-early placement
 			// and any later resize.
-			SizeChanged += (_, __) => PositionRunSummary();
+			SizeChanged += (_, __) =>
+			{
+				PositionRunSummary();
+				PositionRatingPanel();
+			};
 		}
 
 		/// <summary>
@@ -495,6 +509,142 @@ namespace HdtArenaHelper
 		}
 
 		/// <summary>
+		/// The standings row — the player's own rating now, an opponent's in game later — as a panel of its
+		/// OWN, above the deck-stats one. Pass null or empty to remove it.
+		///
+		/// Independent in both senses the request implies: its own layer, so neither panel's reset touches
+		/// the other, and its own lifetime, so it can outlive the deck stats when those are hidden in game.
+		/// </summary>
+		/// <summary>
+		/// Empties everything a SCREEN drew — plaques, the run panel, the deck review — while leaving the
+		/// standings panel alone.
+		///
+		/// This has to exist because the overlay used to rely on being HIDDEN to make stale content
+		/// invisible: every screen's teardown cleared the active screen, the window went invisible, and
+		/// whatever was still drawn on it went unnoticed. Once the standings panel became a second reason to
+		/// stay visible — so an opponent's rank can live through a match — that stopped being true, and a
+		/// finished Discover's three plaques stayed on the board. Content is now cleared when the screen
+		/// goes, rather than merely covered by hiding the window.
+		/// </summary>
+		public void ClearScreenContent()
+		{
+			_canvas.Children.Clear();
+			_cornerLayer.Children.Clear();
+			_runSummary = null;
+		}
+
+		public void SetOwnRating(string? line) => SetStandings(line, null);
+
+		/// <summary>
+		/// The standings panel: the player's own line, and the OPPONENT's beside it during a match. Either
+		/// may be null; both null removes the panel.
+		///
+		/// Side by side in one panel, as asked. The opponent's half is separated by a divider rather than
+		/// simply concatenated, so a missing opponent reads as absent rather than as part of your own line.
+		/// </summary>
+		public void SetStandings(string? own, string? opponent)
+		{
+			_ratingLayer.Children.Clear();
+			_ratingPanel = null;
+			_lastRatingTopLogged = int.MinValue;
+			if(string.IsNullOrEmpty(own) && string.IsNullOrEmpty(opponent))
+				return;
+
+			var row = new StackPanel { Orientation = Orientation.Horizontal };
+			if(!string.IsNullOrEmpty(own))
+			{
+				row.Children.Add(new TextBlock
+				{
+					Text = own,
+					FontSize = 14,
+					FontWeight = FontWeights.SemiBold,
+					Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xD7, 0x6E))
+				});
+			}
+			if(!string.IsNullOrEmpty(opponent))
+			{
+				if(row.Children.Count > 0)
+				{
+					row.Children.Add(new TextBlock
+					{
+						Text = "   |   ",
+						FontSize = 14,
+						Foreground = new SolidColorBrush(Color.FromRgb(0x77, 0x77, 0x77))
+					});
+				}
+				row.Children.Add(new TextBlock
+				{
+					Text = opponent,
+					FontSize = 14,
+					FontWeight = FontWeights.SemiBold,
+					// A different colour, because confusing whose rank is whose is the one mistake this
+					// panel must not make.
+					Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x9B, 0x9B))
+				});
+			}
+			_ratingPanel = new Border
+			{
+				Background = new SolidColorBrush(Color.FromArgb(0xC8, 0x0A, 0x0A, 0x0A)),
+				CornerRadius = new CornerRadius(4),
+				Padding = new Thickness(8, 4, 8, 4),
+				Child = row,
+				HorizontalAlignment = HorizontalAlignment.Left,
+				VerticalAlignment = VerticalAlignment.Top
+			};
+			// Re-anchor once WPF knows how tall it is: the placement below is derived from that height, and
+			// it is 0 until the panel has been measured.
+			_ratingPanel.SizeChanged += (_, __) => PositionRatingPanel();
+			_ratingLayer.Children.Add(_ratingPanel);
+			PositionRatingPanel();
+		}
+
+		/// <summary>
+		/// Places the standings panel so its BOTTOM sits just above the deck-stats panel's top.
+		///
+		/// Deliberately DERIVED rather than given its own fraction: the deck panel's corner is the one
+		/// coordinate here that has been checked against a live client, and inventing a second fraction is
+		/// exactly what this project's geometry rule forbids. So the only new number is a small gap, and the
+		/// top is computed backwards from a measured height. Logged when it moves, so a wrong result can be
+		/// corrected from the log rather than guessed at again.
+		/// </summary>
+		private void PositionRatingPanel()
+		{
+			if(_ratingPanel == null)
+				return;
+			var width = ActualWidth > 0 ? ActualWidth : (double.IsNaN(Width) ? DesignWidth : Width);
+			var height = ActualHeight > 0 ? ActualHeight : (double.IsNaN(Height) ? DesignHeight : Height);
+
+			var deckTop = RunSummaryTop * height;
+			var own = _ratingPanel.ActualHeight > 0 ? _ratingPanel.ActualHeight : 0;
+			// In a MATCH there is no deck-stats panel below, and at the derived height the panel collided
+			// with the opponent name HDT draws in that corner. Lifted only in that case, so the run-screen
+			// placement — the one checked on a live client — does not move.
+			var lift = _runSummary == null ? MatchPanelLift : 0;
+			// Clamped at 0 and LOGGED when it clamps: on a short client there may be no room above the deck
+			// panel, and silently sliding to the top edge would read as a placement bug.
+			var top = Math.Max(0, deckTop - own - RatingPanelGap - lift);
+			_ratingPanel.Margin = new Thickness(RunSummaryLeft * width, top, 0, 0);
+
+			var placed = (int)top;
+			// Not logged before WPF has measured the panel: that first placement is computed from a height
+			// of 0, is never what the player sees, and is superseded within the same tick — logging it put a
+			// wrong-looking coordinate in the log next to the real one.
+			if(own <= 0 || placed == _lastRatingTopLogged)
+				return;
+			_lastRatingTopLogged = placed;
+			Log($"layout OwnRating left={(int)(RunSummaryLeft * width)} top={placed} lift={lift:0} "
+				+ $"(height={own:0}, deck panel top={deckTop:0}{(placed == 0 && deckTop - own - RatingPanelGap < 0 ? ", CLAMPED: no room above" : "")})");
+		}
+
+		/// <summary>Gap between the standings panel and the deck-stats panel below it, in DIP.</summary>
+		private const double RatingPanelGap = 4.0;
+
+		/// <summary>Extra lift applied only IN A MATCH, where there is no deck-stats panel and the derived
+		/// position overlapped the opponent name HDT draws in the same corner. Small on purpose, and logged
+		/// with the resulting coordinate so it can be corrected from the log rather than guessed at.</summary>
+		private const double MatchPanelLift = 4.0;
+
+		/// <summary>
 		/// Anchor the run-summary panel to its fraction of the CLIENT. Falls back to the design size
 		/// while the window is still unmeasured — the same guard the deck-review panel already had,
 		/// and whose absence left this one at 0,0 forever. Called again on every size change, so the
@@ -506,14 +656,30 @@ namespace HdtArenaHelper
 			if(_runSummary == null)
 				return;
 
-			var width = ActualWidth > 0 ? ActualWidth : DesignWidth;
-			var height = ActualHeight > 0 ? ActualHeight : DesignHeight;
+			// ActualWidth is 0 until WPF has measured the window, and SizeChanged alone was not
+			// enough: it fires when the size CHANGES, so a panel built while the window was
+			// unmeasured stayed at the corner whenever the size then stayed put. Measured live —
+			// right once, then "client 0x0, measured=False" twice in the same session. Reposition
+			// knows the real size every tick because it assigns it, so fall back to the assigned
+			// Width/Height before the design space.
+			var width = ActualWidth > 0 ? ActualWidth : (double.IsNaN(Width) ? DesignWidth : Width);
+			var height = ActualHeight > 0 ? ActualHeight : (double.IsNaN(Height) ? DesignHeight : Height);
 			_runSummary.Margin = new Thickness(RunSummaryLeft * width, RunSummaryTop * height, 0, 0);
-			Log($"layout RunSummary left={RunSummaryLeft * width:0} top={RunSummaryTop * height:0} "
-				+ $"(client {ActualWidth:0}x{ActualHeight:0}, measured={ActualWidth > 0})");
+			// Logged only when it MOVES: this is called every tick from Reposition, and a line per
+			// poll would bury the log it exists to make readable.
+			var placed = (int)(RunSummaryLeft * width);
+			if(placed == _lastRunSummaryLeft)
+				return;
+			_lastRunSummaryLeft = placed;
+			Log($"layout RunSummary left={placed} top={RunSummaryTop * height:0} "
+				+ $"(client {width:0}x{height:0}, measured={ActualWidth > 0})");
 		}
 
+		private int _lastRunSummaryLeft = -1;
+
 		private Border? _runSummary;
+		private Border? _ratingPanel;
+		private int _lastRatingTopLogged = int.MinValue;
 
 		// Fractions of the client, not absolute pixels, so a resize re-anchors by itself. First guess:
 		// clear of the reward banner on both run screens. Re-check on a live client before trusting.
@@ -851,6 +1017,11 @@ namespace HdtArenaHelper
 			var h = Math.Max(1, rect.Bottom - rect.Top);
 			Width = w / scale;
 			Height = h / scale;
+
+			// The run panel is placed in real client pixels, so it has to follow the window every
+			// tick — a Thickness assignment, and the only thing that reliably catches the case where
+			// the panel was built before WPF had measured anything.
+			PositionRunSummary();
 
 			if(w != _lastLoggedWidth)
 			{

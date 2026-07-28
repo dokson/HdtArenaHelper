@@ -7,8 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-28
+
+### Added
+
+- **Your own arena rating on the run screen, and the rank it would put you at.** A panel of its own
+  above the deck stats: the rating exactly as the client reports it, plus — when you are not listed —
+  the position that rating *would* enter the leaderboard at. Both cost nothing: the rating is read
+  from the client with no network at all, and the projected rank is a count over the board already
+  cached locally. Worded "would enter", never "your rank", because a listing also needs a seasonal
+  minimum of games. Offered for **Underground only**: that board publishes the same rating the client
+  reports (verified live), while the Normal Arena board publishes average wins per run, and placing a
+  rating on a board sorted by average wins would be an invented number.
+- **The current arena opponent's rank, beside your own, for the whole match.**
+  `OpponentIdentityWatcher` reads the opponent's BattleTag; `ArenaLeaderboardSource` looks it up
+  against Blizzard's own `leaderboardsData` API — first-party data, display-only, never blended into
+  any score. **Opt-in and OFF by default** ("Opponent leaderboard rank" in the plugin menu): it is
+  continuous background traffic against Blizzard's own site, so nobody's bandwidth pays for it without
+  asking. Shown in the same panel as your own standing, in a different colour and behind a divider,
+  because confusing whose rank is whose is the one mistake that panel must not make. A shared display
+  name resolves to the best rank *and says how many players share it*, never to one rank asserted as
+  certainly theirs; a name the crawl has not reached says "checking" rather than "not listed", because
+  those are different facts.
+- **A rule for OUTCAST cards at the mulligan, because the effect is positional.** Outcast fires only
+  from the leftmost or rightmost card in hand, and the two edges are not equivalent: the left one is
+  stable, while a card always arrives on the right before your first turn — your draw, or the Coin —
+  so a rightmost Outcast is gone before it can be used, and the card that displaces it may be
+  expensive enough to make the whole plan moot. Read off `GameTag.OUTCAST` and never the text: 13 cards
+  say the word "Outcast" without having the mechanic, Illidari Studies among them, and a text match
+  would make positional claims about cards that have no positional behaviour. The rule can only
+  DEMOTE a Keep to Situational, never toss: mulliganing rearranges the very positions it reads, so a
+  positional toss would invalidate its own premise, while Situational asserts nothing about what to do
+  and leaves the reading intact.
+- Most opponents will not resolve, and two separate reasons matter. The board covers only a few
+  thousand players per region, and **a listing needs a seasonal minimum of games**: measured live, a
+  rating well above the board's own threshold was still absent. So "not on the leaderboard" says
+  nothing about how good a player is, and nothing in the plugin implies that it does.
+
 ### Changed
 
+- **A cheap spell that puts bodies on board now counts as one of the deck's early plays.** It already
+  counted when judging that card — the documented Mining Casualties rule — but the count that decides
+  whether a deck is *thin* on early plays saw only minions, weapons and locations, so the same card was
+  an early play in one place and did not exist in the other. One definition now serves both.
+  **This changes advice**: 79 more cards count across the cost-1-2 pool (3.3%, spread very unevenly —
+  Druid 18, Mage 2), so decks look less thin, the early window widens less often, and some 3-drops that
+  were kept are now demoted. No wrong verdict was demonstrated; this is a consistency fix, adopted
+  deliberately.
+- The run screen is recognised in the `REDRAFTING` and `MIDRUN_REDRAFT_PENDING` states, not only
+  `MIDRUN`. Around a redraft the client reports `REDRAFTING`, and in that state **nothing** appeared:
+  the deck-review panel wants `EDITING_DECK`, the run panel wanted `MIDRUN`, and the standings panel
+  hangs off the run panel — so the deck description came back only if you left arena and re-entered.
+- **Silent code paths now say why they are silent.** Three separate "nothing is showing and nothing is
+  logged" investigations this release each ended at a branch that returned without a word: an
+  unrecognised session state, a scene that did not match (which returns *before* any diagnostic inside
+  the watcher, so the watcher looked dead), and a choice list that is neither empty nor three. Each now
+  logs once per distinct value. The deck description is still deliberately **not** shown during the
+  redraft's `EDITING_DECK` phase — that screen already carries the scored cut list, and the numbers stay
+  in the log.
+- **The leaderboard crawl follows demand, not uptime.** It starts when you reach an arena screen,
+  crawls one page at a time, and stops once no arena has been played for a while — rather than running
+  for the whole session after a single match. One board per client at a time, only your current region
+  (regions are separate shards, so the others hold nobody you can be matched against), gzip requested
+  explicitly, and a full refresh pass targeted at 24 hours. Measured, the combination takes the
+  worst-case client from ~171 MB/day to a few hundred requests proportional to how much arena you
+  actually play.
+- A display name published by more than one player now resolves to **all of them**, best rank first,
+  rather than to whichever the crawl saw last — which, since it walks pages in rank order, was
+  systematically the worst of them. Measured on live boards: about 1% of names are shared, and their
+  holders sit hundreds of ranks apart.
+- **The overlay's show/hide decision is now a pure class with a test per bug it caused.** Which screen
+  is active and whether the overlay should be visible used to live inside the plugin's update loop,
+  next to WPF and client calls — untestable, and the source of four separate overlay bugs, each found
+  by someone watching a live client rather than by a test. `OverlayState` holds the rules; its tests
+  are those four bugs written as regressions, and each was verified to go red when the corresponding
+  mistake is put back.
+- **The player's own standings panel refreshes instead of being built once.** The client's rating reads
+  as null intermittently and the leaderboard cache loads on a background thread, so a panel built at
+  render time could show no rating at all, or state that the crawl had not finished a pass over a cache
+  that had. Neither corrected itself, because the screen does not change again.
 - **A card, a hero power and a hero are three different kinds of thing, and now three different
   databases.** They shared one list and one set of named accessors, where the bare name went to
   whichever printing had the lowest dbf id — so `HSCard.IcyTouch` was the Mage HERO POWER rather than
@@ -21,9 +98,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hearthstone-hero-powers.md`, `hearthstone-heroes.md`. The generator is `HSDatabaseGenerator` and
   its flag is `--dump-database`. It returns a LIST of files it writes, and the drift test iterates
   that list rather than naming the files itself, so a file nothing checks cannot be added by accident.
+- **Repeated in-game Discover offerings are documented rather than papered over.** The debounce
+  comment claimed to fix them; measured across two live sessions it does not, and the shortest gap
+  between a repeated trio was 10 seconds. The comment now says so, records that HearthMirror exposes
+  no per-choice id to key on, and the log line carries the diagnostic needed to establish staleness.
 
 ### Fixed
 
+- **Four overlay bugs, and the rules that caused them are no longer untestable.** The arena run panel
+  could sit on top of a live Battlegrounds game (nothing dropped it when the client left the arena
+  screens); it could survive a switch between Underground and Normal Arena, showing the previous mode's
+  run; it could vanish for the rest of the arena screen, because an attempt to fix the first hung the
+  teardown on an event that also fires while you are still in arena; and a finished Discover's three
+  plaques stayed drawn on the board, because the overlay had always relied on being HIDDEN to make
+  stale content invisible — which stopped being true once the standings panel could keep the window
+  visible through a match. The run panel now has its own teardown signal, distinct from the draft
+  panel's and from leaving the scene; content is cleared when a screen goes rather than merely covered.
+  The show/hide decision moved into `OverlayState`, a pure class with no WPF and no client calls, and
+  its tests are these four bugs written as regressions — each verified to go red when the mistake is
+  put back.
+- A malformed number from a downloaded payload no longer kills the leaderboard crawl silently.
+  Newtonsoft's `JToken` casts throw rather than returning null, and net472 swallows an unobserved task
+  exception — so a rating stated as a string would have stopped the crawl for the session with nothing
+  in the log. Values of the wrong type are dropped, the way every other poisoned field already was.
+- The crawl no longer loses progress on a transient network failure, retries only failures that are
+  actually transient (a 4xx is a refusal and is never retried), and no longer keeps running after the
+  plugin is disabled or unloaded.
+
+- **DIVINE SHIELD ends the one-health question before it is asked.** Hardlight Protector, a 2/1 Mech
+  *with* Divine Shield, was told "1 health, dies to Ghoul Charge" — it does not: the shield eats the
+  first instance of damage whatever its size, so a ping bounces off and the Charge Ghoul trades
+  itself for the shield. Read off the card, not the text. 14 collectible minions at cost 3 or less
+  have one health and Divine Shield, Argent Squire among them.
 - **A card that UPGRADES while you hold it is no longer simply "too slow".** Infuse states it as a
   keyword ("Infuse (3): Gain +2/+2") and a handful of older cards say it longhand ("Whenever a
   friendly minion dies while this is in your hand, gain +1/+1"): for those, holding the card IS the

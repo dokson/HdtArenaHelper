@@ -620,6 +620,235 @@ At that n the standard error is ~1.1pp, so a 3.8pp gap is ~3 SE — not obviousl
 single-class 4-day window is also where a meta artefact would look exactly like a class effect, and
 the two buckets are not independent (ALL contains the class). Not acted on.
 
+**OUTCAST is a TAG, and the word is not the mechanic.** 2026-07-29, measured through
+`DeckMulliganAdvisor.HasOutcast` over the 8,107 collectible cards: **35** carry `GameTag.OUTCAST`,
+**48** contain the word "Outcast" in their text, so **13** say the word without having the mechanic —
+Illidari Studies (discovers one), Line Hopper (discounts them), Redeemed Pariah (pays you for playing
+them), Glaivetar's reminder line, Kor'vas Bloodthorn, Calamity's Grasp, Wretched Exile, Vengeful
+Walloper, Felerin, Double Jump, Bartend-O-Bot, plus reprints. Every card that carries the tag also
+says the word, so the tag loses nothing and a text match would attach a positional claim to 13 cards
+whose hand position is irrelevant to them. This is the shape of the `demons?`-matches-"Demon Hunter"
+trap in §15. Tagged cards by cost: 1:6, 2:7, 3:9, 4:8, 5:3, 6:2 — so 22 of 35 sit in or near the
+early window, which is where the positional demotion can actually bite. By type: 17 minions, 17
+spells, 1 weapon.
+
+**How often the positional rule fires.** Through the engine, each tagged card placed leftmost,
+middle and rightmost in a 3-card hand against a top-heavy deck (so the early window is open):
+**8 of the 35** come back as a Keep when leftmost, and all 8 are demoted to Situational in BOTH the
+middle and the right seat — Wayward Sage, Gan'arg Glaivesmith, Dreadlord's Bite, SECURITY!!,
+Eldritch Being, Ci'Cigi (plus reprints). The rule is one-way: it can only demote a Keep, so its
+maximum effect on a hand is those 8 cards losing a Keep they would otherwise have got.
+
+**The two definitions of "early play", and the size of reconciling them.** `CountEarlyPermanents`
+counted only MINION/WEAPON/LOCATION at cost 1-2, while the per-card rule counts a cheap spell that
+summons as an early play (the Mining Casualties rule). Measured through `IsPermanentPlay` over the
+cost-1-2 collectible pool (2,371 cards): the old notion sees **1,281**, the shared one sees
+**1,360** — **79 added summon-spells**, 3.3% of the cheap pool and ~6% of the cheap plays. Very
+unevenly spread by class: Druid 18, Hunter 12, Shaman 10, Paladin 10, Demon Hunter 7 (SECURITY!!
+among them), down to Mage 2 and Warrior 2. Direction of the change on live advice: decks look LESS
+thin, so the early window widens less often and 3-drops that used to be kept are demoted. Since
+`ThinEarlyGame` is 6, a shift of one counted card can flip a deck across it, which is why this is a
+maintainer decision rather than a bug fix. **No wrong verdict has been demonstrated from the
+disagreement** — the one live case that looked like one was traced against the pre-redraft deck (4
+early minions, comfortably thin), where the widened window was justified.
+
+### 17. Blizzard's arena leaderboard endpoint, measured
+
+All figures below are from live requests to
+`hearthstone.blizzard.com/en-us/api/community/leaderboardsData`, and they correct three claims an
+earlier pass had recorded from memory. Nothing here is blended into any score — the leaderboard is
+display-only, like the class win-rate label.
+
+**Shape and paging.** `{seasonId, leaderboard:{rows:[{rank, accountid, rating}], pagination:
+{totalPages, totalSize}}, displayMetaData, seasonMetaData, regions, region}`. 25 rows per page, and
+the page size CANNOT be overridden — `pageSize`, `size`, `limit` and `per_page` are all ignored. There
+is no server-side search either: `searchQuery`, `search`, `player` and `accountid` leave page 1
+unchanged. `accountid` is a bare display name with no discriminator. The locale path segment is
+required; without it the request 307s to the `en-us` form.
+
+**Board sizes** (one season's snapshot — these move, do not pin them):
+
+| leaderboardId | US | EU | AP | total pages |
+|---|---|---|---|---|
+| `arena` | 391 | 711 | 455 | 1,557 |
+| `undergroundarena` | 77 | 155 | 87 | 319 |
+
+**Page weight: ~291 KB raw on EVERY page, not ~155-175 KB after page 1** (measured: page 1 291,380 B,
+page 2 291,378 B, page 300 291,421 B). The reason is that the leaderboard itself is only ~1.5 KB of
+the body; `seasonMetaData` (~266 KB) and `displayMetaData` (~40 KB) are identical boilerplate repeated
+on every page, i.e. **~99.5% of each request is bytes the caller already has**. Requesting compression
+brings a page to ~16-17 KB, a ~17x reduction, which is why `ArenaLeaderboardSource` asks for gzip;
+`WebClient` sends no `Accept-Encoding` on its own, so this needed an explicit subclass.
+
+Consequence for the per-client crawl: a first full Arena crawl of a single region is hundreds of pages
+and tens of minutes of uptime. Crawling all three regions instead of just the player's own would have
+tripled that for rows no lookup could ever match — regions are separate shards — which is why only the
+current region is crawled.
+
+**The pacing arithmetic, and why `FullRefreshInterval` moved from 2 h to 24 h.** At a per-page delay of
+`FullRefreshInterval / totalPages`, a 2-hour pass meant:
+
+| board | region | pages | s/page | req/h | KB/h |
+|---|---|---|---|---|---|
+| arena | EU | 711 | 10.1 | 356 | 5,866 |
+| arena | AP | 455 | 15.8 | 228 | 3,754 |
+| arena | US | 391 | 18.4 | 196 | 3,226 |
+| undergroundarena | EU | 155 | 46.5 | 78 | 1,279 |
+| undergroundarena | AP | 87 | 82.8 | 44 | 718 |
+| undergroundarena | US | 77 | 93.5 | 39 | 635 |
+
+An EU player who played both modes therefore ran **433 req/h and 7.15 MB/h — 10,392 requests and 171 MB
+per day**, because nothing stopped the crawl and nothing stopped a second board crawling alongside the
+first. The comparison that settles it: `HDT_BGrank`'s always-on VM, which **Data sources & ethics**
+rejects as impolite, re-scrapes its boards at roughly **720 req/h from one address**. About 100 EU
+installs of this plugin at the old pace would have been ~43,000 req/h from 100 addresses — ~60x that
+volume. Three changes, in descending value: 24-hour passes (~12x), stopping the crawl outside an
+`ActivityWindow` of arena play (a further ~5-20x for a typical player, and it is what makes "traffic
+scales with client use" true rather than aspirational), and one crawl per client instead of one per
+board (~2x for anyone who plays both modes). What the 2-hour pass bought was unobservable: the Arena
+column is average wins per run across a season, which moves ~0.01 per additional run.
+
+**Keep-alive is load-bearing once the pace slows.** `ServicePointManager.MaxServicePointIdleTime`
+defaults to 100 s, and the derived delay was already **93.5 s** on the smallest board — a 7% margin.
+Past that every page pays a fresh TCP + TLS handshake, roughly +5 KB of certificate and key exchange
+against a 16.5 KB page (~+30%). The constructor raises the idle timeout for this reason; raising
+`FullRefreshInterval` without it would have given back a third of the gzip win.
+
+**Tried and rejected, so it is not re-proposed:** per-page freshness tiers (refresh early pages more
+often). The intuition is backwards for this ladder — membership churn is concentrated at the CUTOFF, the
+deepest pages, as players qualify, while the top is the most stable part of a season-average board, and
+rank drift below an insertion is ±1. It would add persisted per-page state to prioritise the pages that
+need it least.
+
+**`region=CN` is not rejected, it silently serves EU.** `CN`, a garbage region (`ZZZZ`) and an empty
+region all return byte-identical rows to `region=EU` (same row hash, same `totalSize`), and the
+payload echoes `"region":"EU"` back. So querying CN would show a real rank under the wrong player's
+name, which is why the region whitelist is load-bearing rather than cosmetic. China has a separate API
+host entirely (`webapi.blizzard.cn/hs-rank-api-server/...`, different parameters), not this endpoint.
+
+**Shared display names are real, measured, and were being resolved to the WRONG player.** The board
+publishes `accountid` with no discriminator, and a Blizzard display name is not unique — the
+discriminator is what makes a BattleTag unique. This was written off in a doc comment as "an accepted,
+rare mismatch risk" with nothing measuring either word, so it was measured: a full crawl of the
+smallest board (`undergroundarena` US, 77 pages) returned **1,925 rows, 1,910 distinct names, 14 names
+appearing more than once — 29 rows, 1.51%.**
+
+The damage is not proportional to that 1.5%, because duplicate holders are nowhere near each other:
+
+| name | ranks | ratings |
+|---|---|---|
+| DizzyDwarf | 436, 1467, 1864 | 4086, 2312, 1610 |
+| NeonSatyr | 65, 1733 | 5431, 1845 |
+| Tron | 73, 1696 | 5374, 1927 |
+| JadeStag | 171, 559 | 4819, 3835 |
+
+The crawl walks pages in rank order, so keying a name to a single row keeps whichever was seen last —
+systematically the **worst** of the duplicates: rank 1864 for a name whose best holder is 436. That is a
+real rank under the wrong player's name, the identical failure the region whitelist exists to refuse.
+
+So the lookup returns EVERY holder (`FindAll`, best rank first) and the caller presents them as
+alternatives. Reporting all of them keeps the ~1.5% of hits that failing closed would have thrown away,
+while still never asserting that one of them IS the opponent — which is the part that was wrong. Sharing
+is a property of a pass, so an entry collapses back to one holder once the duplicate leaves the board;
+the extra holders are persisted, since a restart mid-pass would otherwise forget and answer with one
+player as though they were the only one. The per-pass log line reports how many names are shared, so the
+rate stays observable per region instead of assumed.
+
+**Conditional requests do not work, so do not reach for them.** The response carries a weak `ETag` and
+no `Cache-Control` and no `Last-Modified`. The ETag looks like the obvious way to make a refresh pass
+nearly free, and it is not: it **changes on every request for the same page**. Three consecutive
+requests for `arena` page 2 returned three different ETag hashes behind an identical length prefix
+(`W/"47232-…"`), i.e. the body differs byte-for-byte each time at constant size — something in it
+rotates. A conditional GET with a freshly-obtained, valid `If-None-Match` returns **200 with the full
+body, never 304** (control: a bogus ETag also returns 200, so the header is simply not honoured for
+caching). Consequence: every page of every refresh pass costs a full ~16-17 KB gzipped body, and no
+client-side revalidation can avoid it.
+
+**Range requests are not supported either, which is the one that hurts.** The leaderboard sits at the
+very START of the body (`{"seasonId":56,"leaderboard":{"rows":[…`), with the ~306 KB of metadata after
+it, so a byte-range fetch of the first few KB would have been a ~2x win over the gzipped page and
+skipped the boilerplate entirely. It is closed: no `Accept-Ranges` header is advertised, and a request
+with `Range: bytes=0-8191` returns **200 with the full 291,378 bytes**, not 206. Do not re-attempt it.
+
+Also closed by net472 rather than by the endpoint: **brotli** (`DecompressionMethods.Brotli` does not
+exist there and `BrotliStream` needs a package — it would have been worth ~20% over gzip) and
+**HTTP/2** (unavailable, and it would only compress request headers, worthless against a 16.5 KB body).
+So gzip is the whole of the available HTTP-level win, and it is taken.
+
+**There is no better endpoint to find — checked, so it need not be checked again.** China's
+`webapi.blizzard.cn/hs-rank-api-server/` (the host `HDT_BGrank`'s bot uses for CN) is a genuinely
+better-designed API than the global one: it validates `mode_name` and answers `20002 参数非法` on a bad
+value instead of silently serving something else, and it reports a `total`. It has **no global
+equivalent**: `webapi.blizzard.eu` and `webapi.blizzard.com` are NXDOMAIN, and `webapi.blizzard.us`
+resolves to a parked AWS address with nothing listening on 443 (verified against a working CN request
+as the positive control, since a bare connection failure proves nothing on a flaky route). That host
+belongs to the NetEase-operated China service and its separate stack — which is the same fact as the
+EU fallback above, seen from the other side: the global endpoint holds no China data at all, so asking
+it for `region=CN` cannot fail cleanly.
+
+Its arena board is small: `mode_name=arena` is a valid mode returning 500 players / 20 pages, and the
+season id has to be discovered rather than hard-coded (`HDT_BGrank`'s bot reads `seasonId` from the
+GLOBAL endpoint and reuses it for CN; verified this also resolves arena data). CN remains excluded —
+adding a host is adding a source, which is a decision, not an implementation detail.
+
+**An invalid `leaderboardId` also falls back silently**, to a different and larger board (a different
+`seasonId`, 530 pages) whose rows carry **no `rating` field at all**. Rows like that are skipped, so
+the failure surfaces as an empty map after a long crawl rather than as an error — the reason the
+"a row missing a field" case is a real payload shape and has a test.
+
+**The Underground `rating` has no documented scale.** Values are integers in the thousands (8102,
+7680, 7272). `displayMetaData` describes the column only as `{"title":"Rating","column_id":"rating",
+"column_label":"Rating"}` — no format, scale or decimal field anywhere in the payload. An earlier
+version divided it by 100 on the assumption that 8102 meant 81.02; that assumption has no support in
+the feed and was removed. The value is now reported exactly as stated.
+
+**Live reading of the local player's ratings, and what it settles.** Logged raw from a live client
+(EU, an Underground run in progress): both `Rating` and `UndergroundRating` came back as four-digit
+integers. The player independently reported the Underground figure the game showed them, and it **matched
+the client's integer exactly**, so for Underground the client value IS the number the game shows — no
+conversion, and nothing to reconcile on that side. (The figures themselves are a tester's personal data
+and are deliberately not recorded here.)
+
+Two findings follow, one of them a limitation of the whole feature:
+
+- **A rating above the board's floor does not mean a place on the board.** The EU `undergroundarena`
+  board at that moment held 4,143 players, floor **1501** with nothing at or below 1500 (so the
+  eligibility threshold is a round "rating > floor"), and strictly sorted by rating with zero rank/rating
+  inversions across every row. The tester's rating would have placed them in the lower half of the board —
+  located by the rating band that brackets it — and they are nonetheless **absent**, searched both
+  Ordinal and case-insensitively. The reason, reported by the player and consistent with everything
+  observed: **the seasonal leaderboard requires a minimum number of games (~30) to be listed at all.**
+  That figure is NOT published anywhere in the payload — `seasonMetaData` carries only `season_id`, a
+  `mode` block and an `href` to an authenticated partner API, with no dates and no requirements — so it
+  is player-side knowledge, not something the runtime can read or should hard-code. Consequence to
+  respect either way: **"not on the leaderboard" does NOT imply "below the cutoff"**, and nothing may be
+  inferred about an opponent's strength from an absent row.
+- **The two CLIENT fields are the same kind of thing; the two BOARDS are not.** `ArenaRatingInfo.Rating`
+  and `.UndergroundRating` are both ratings on the same sort of scale — a low Normal Arena figure simply
+  means a low rating, not a different unit. The asymmetry is on the published side: the Underground board
+  publishes that rating, while the Normal Arena board's `rating` column is **average wins per run** (9.11
+  at EU rank 1, then 8.37, 7.09). So for Normal Arena the client integer and the published column are
+  different QUANTITIES and no scale reconciles them — an MMR does not convert into an average number of
+  wins at any factor. A **x100 reading was briefly plausible and
+  is refuted**: dividing that client integer by 100 yields an average-wins figure that a binary search
+  places inside the EU top ~150, which a player who has not started a run this season cannot be.
+
+  So the two boards differ in kind, and that decides what is buildable:
+  **Underground** publishes the same integer the client reports (verified to match exactly), so a rating
+  read from the client is directly comparable to the board and can locate a position on it.
+  **Normal Arena** publishes a statistic the client does not expose, so a client rating cannot be placed
+  on that board at all — only a name lookup works there. Do not "fix" this with a conversion factor.
+
+Board sizes move fast, which is why none of them is pinned in code: EU `undergroundarena` went from 155
+pages / 3,864 rows to 166 pages / 4,143 rows within hours of the same day.
+
+**Open: the local player's rating is on an unknown scale relative to the leaderboard's.**
+`Reflection.Client.GetArenaRatingInfo()` returns `ArenaRatingInfo { int Rating, int UndergroundRating }`
+(verified by reflecting the shipped HearthMirror assembly), while the Arena leaderboard reports a
+decimal (8.37 = average wins per run). Whether the client integer is that value x100, a truncation, or
+an unrelated internal quantity cannot be established offline; it needs one reading from a live client
+whose leaderboard standing is known. Until then the two must not be displayed in the same units.
+
 ## Known limitations
 
 1. Target = win-rate of the deck that includes the card: correlational, not causal (draft

@@ -138,6 +138,21 @@ namespace HdtArenaHelper
 		private bool _unresolvedLogged;
 		private string? _lastReviewSig; // dedup the deck-edit review; re-fire when the deck changes
 		private string? _lastRunSig;    // same, for the run screen: re-fire only when the deck changes
+		private object? _lastQuietState; // the session state last reported as "nothing of ours", logged once
+		private int _lastPartialChoiceCount = -1; // a non-pick choice count, logged once per distinct value
+
+		/// <summary>The arena screens are gone for real (the client left the DRAFT scene), so anything still
+		/// showing from them must be dropped. Distinct from <c>OnDraftEnded</c>, which also fires while the
+		/// player is still in arena — see <see cref="OnSceneLeft"/>.</summary>
+		public event EventHandler? OnArenaScreenLeft;
+
+		/// <summary>
+		/// The RUN screen specifically is no longer being reported, so its panel must go — while the player
+		/// may well still be in arena, which is why this cannot ride on <c>OnDraftEnded</c> or on leaving the
+		/// scene. The case that needs it: switching to a mode with no run in progress leaves the previous
+		/// mode's run panel on screen, because nothing else in the poll clears it.
+		/// </summary>
+		public event EventHandler? OnRunSummaryGone;
 
 		/// <summary>
 		/// The arena screens all live in the DRAFT scene. The gate is the base's, and it is
@@ -147,8 +162,29 @@ namespace HdtArenaHelper
 		/// </summary>
 		protected override SceneMode Scene => SceneMode.DRAFT;
 
-		/// <summary>Left the arena screens: hide whatever was up (fires OnDraftEnded once).</summary>
-		protected override void OnSceneLeft() => EndDraft();
+		/// <summary>
+		/// Left the arena screens entirely. This is the ONLY place the run summary may be torn down, and it
+		/// is deliberately not <see cref="EndDraft"/>: that also runs on transitions the player stays in
+		/// arena for (a redraft trimmed back to 30, a session state that is no longer a real pick), so
+		/// hiding the run panel there made it flicker — or vanish, since its dedup would not re-raise it.
+		///
+		/// The run signature is cleared here too, and that is what makes re-entering arena work: the run
+		/// summary re-fires only when the DECK changes, so leaving and coming back with the same deck would
+		/// otherwise never raise it again and the panel would be gone for good. `EndDraft` already does the
+		/// same for the review signature; the run one was missing, which is why hiding the panel and
+		/// showing it again could not both work.
+		/// </summary>
+		protected override void OnSceneLeft()
+		{
+			// Called on EVERY poll while the scene is not ours, so it has to fire ONCE per departure:
+			// unguarded it raised the event twice a second and filled the log with identical lines. After
+			// the first pass both of these are cleared, so later polls are no-ops.
+			var wasShowing = _wasDrafting || _lastRunSig != null || _lastReviewSig != null;
+			EndDraft();
+			_lastRunSig = null;
+			if(wasShowing)
+				OnArenaScreenLeft?.Invoke(this, EventArgs.Empty);
+		}
 
 		/// <summary>Reset transient state; call from the plugin's OnLoad on (re)enable.</summary>
 		public override void Reset()
@@ -182,6 +218,7 @@ namespace HdtArenaHelper
 			// are obvious. This is a real screen even though no card is being picked.
 			if(arenaInfo != null && arenaInfo.SessionState == ArenaSessionState.EDITING_DECK)
 			{
+				EndRunSummary(); // the redraft screen is not the run screen
 				HandleDeckEdit(arenaInfo);
 				return;
 			}
@@ -196,14 +233,45 @@ namespace HdtArenaHelper
 				// "Nothing else is showing" is true of the main menu and Battlegrounds too.
 				if(arenaInfo != null && HandleRunSummary(arenaInfo))
 					return;
+				// Nothing of ours is on screen — including no run to report. This is the path a mode switch
+				// takes when the other mode has no run in progress, and without EndRunSummary the previous
+				// mode's panel stayed up.
+				//
+				// The session state is LOGGED here, once per distinct value: this branch is where every
+				// "why is nothing showing?" ends up, and it used to return in silence, so the log could not
+				// tell an unrecognised state from a screen we had decided to ignore. Seen live after a
+				// redraft, where the panels vanished and nothing said which state the client had moved to.
+				var state = arenaInfo?.SessionState;
+				if(!Equals(state, _lastQuietState))
+				{
+					_lastQuietState = state;
+					Log($"no arena screen of ours: session state {(state == null ? "unreadable" : state.ToString())}");
+				}
+				EndRunSummary();
 				EndDraft();
 				return;
 			}
 
+			EndRunSummary(); // a pick is on screen, so the run panel is not what the player is looking at
+
 			// Mid-animation the memory can expose a partial choice list; only 3 is a real
 			// pick (HDT's ArenaStateWatcher applies the same 0-or-3 rule).
+			//
+			// LOGGED, once per distinct count, because this return is otherwise invisible and it swallows
+			// the whole poll: a list that is neither empty nor 3 skips the run screen and the session-state
+			// diagnostic alike. Live symptom: two minutes of complete silence on the arena deck screen with
+			// the scene reading DRAFT, which is indistinguishable from a dead watcher.
 			if(choices.Choices.Count != 3)
+			{
+				if(_lastPartialChoiceCount != choices.Choices.Count)
+				{
+					_lastPartialChoiceCount = choices.Choices.Count;
+					Log($"choice list of {choices.Choices.Count} is not a pick (only 0 or 3 are); "
+						+ "no screen handled this poll");
+				}
 				return;
+			}
+			_lastPartialChoiceCount = -1;
 
 			if(arenaInfo == null)
 				return; // transient (HS starting/closing); retry next tick
@@ -387,13 +455,25 @@ namespace HdtArenaHelper
 		/// The run screen between matches: a finished deck, and no pick to make. Returns true when it
 		/// took responsibility for the screen, so the caller does NOT hide the overlay.
 		///
-		/// `MIDRUN` is the whole gate, and it has to be: this screen reports as the DRAFT scene (the
-		/// client's arena hub does), so the scene gate alone cannot tell it from the main menu, and
+		/// The session state is the whole gate, and it has to be: this screen reports as the DRAFT scene
+		/// (the client's arena hub does), so the scene gate alone cannot tell it from the main menu, and
 		/// "no choices on screen" is true of every screen in the game.
+		///
+		/// `MIDRUN` alone was too narrow. Measured live, the client also reports **`REDRAFTING`** while the
+		/// player is on the deck screen around a redraft, and in that state nothing showed at all: the
+		/// deck-review panel wants `EDITING_DECK`, this wanted `MIDRUN`, and the rating panel hangs off
+		/// this one. `MIDRUN_REDRAFT_PENDING` is included for the same reason — the run exists and the deck
+		/// is complete in both.
+		///
+		/// KNOWN RISK, accepted deliberately: `EDITING_DECK` is documented to leak outside arena (the
+		/// client keeps reporting it from the main menu and from inside Battlegrounds, which is how the
+		/// deck panel once sat on top of both). Whether `REDRAFTING` leaks the same way is NOT established.
+		/// If a run panel ever appears outside arena, this widening is the first thing to suspect, and the
+		/// log line below names the state that let it through.
 		/// </summary>
 		private bool HandleRunSummary(ArenaInfo arenaInfo)
 		{
-			if(arenaInfo.SessionState != ArenaSessionState.MIDRUN)
+			if(!IsRunScreenState(arenaInfo.SessionState))
 				return false;
 
 			var deck = new List<int>();
@@ -419,7 +499,13 @@ namespace HdtArenaHelper
 			if(draftClass == HearthDb.Enums.CardClass.INVALID)
 				draftClass = ToClass(arenaInfo.Deck?.HeroPower);
 
-			var sig = deck.Count + ":" + string.Join(",", deck.OrderBy(d => d));
+			// The signature carries the MODE and the RECORD, not just the deck. Deck-only was enough to
+			// re-fire on a pick, and wrong for everything else the panel shows: with an unchanged deck a
+			// win would not update the displayed W-L, and two runs sharing a deck would not redraw when
+			// switching between them. Prophylactic rather than observed — but the panel states these
+			// numbers, so they belong in the key that decides whether to restate them.
+			var sig = $"{arenaInfo.IsUnderground}:{draftClass}:{arenaInfo.Wins}-{arenaInfo.Losses}:"
+				+ deck.Count + ":" + string.Join(",", deck.OrderBy(d => d));
 			if(sig != _lastRunSig)
 			{
 				_lastRunSig = sig;
@@ -470,6 +556,26 @@ namespace HdtArenaHelper
 		private static IReadOnlyList<(string Id, int Count)>? ToPairs(
 			IEnumerable<HearthMirror.Objects.Card>? cards)
 			=> cards?.Select(c => (c.Id, c.Count)).ToList();
+
+		/// <summary>
+		/// Drops the run panel, once, when the run screen stops being reported. Called from every poll path
+		/// that is NOT the run screen — a pick, the deck-edit phase, and "nothing of ours on screen" — because
+		/// the player can leave the run screen without leaving arena, and nothing else clears it then.
+		/// </summary>
+		/// <summary>The states in which a completed run deck is what the player is looking at. See
+		/// <see cref="HandleRunSummary"/> for why this is the whole gate and what it risks.</summary>
+		private static bool IsRunScreenState(ArenaSessionState state)
+			=> state is ArenaSessionState.MIDRUN
+				or ArenaSessionState.REDRAFTING
+				or ArenaSessionState.MIDRUN_REDRAFT_PENDING;
+
+		private void EndRunSummary()
+		{
+			if(_lastRunSig == null)
+				return;
+			_lastRunSig = null;
+			OnRunSummaryGone?.Invoke(this, EventArgs.Empty);
+		}
 
 		private void EndDraft()
 		{

@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -59,6 +61,85 @@ namespace HdtArenaHelper
 			{
 				return null;
 			}
+		}
+
+		/// <summary>
+		/// Parse a JSON object straight off a response stream, under the same depth and byte ceilings as
+		/// the string overload, or null if it is malformed or breaches either.
+		///
+		/// Same invariant, same means: <c>JObject.LoadAsync</c> over a <c>JsonTextReader</c>, never
+		/// <c>DeserializeObject&lt;T&gt;</c>, never <c>TypeNameHandling</c>. The byte ceiling is enforced by
+		/// the stream wrapper rather than by measuring a string afterwards — which is the point of reading
+		/// this way, since a caller that has already buffered the whole body cannot bound anything.
+		/// </summary>
+		internal static async Task<JObject?> ParseObjectAsync(Stream? stream, CancellationToken token)
+		{
+			if(stream == null)
+				return null;
+			try
+			{
+				using(var bounded = new CeilingStream(stream, MaxPayloadBytes))
+				using(var text = new StreamReader(bounded, Encoding.UTF8))
+				using(var reader = new JsonTextReader(text) { MaxDepth = MaxJsonDepth })
+				{
+					var obj = await JObject.LoadAsync(reader, token).ConfigureAwait(false);
+					// Anything after the top-level object is not a document we understand.
+					return await reader.ReadAsync(token).ConfigureAwait(false) ? null : obj;
+				}
+			}
+			catch(Exception ex) when(ex is JsonException || ex is InvalidDataException)
+			{
+				return null;
+			}
+		}
+
+		/// <summary>
+		/// Read-only pass-through that refuses to hand out more than <c>max</c> bytes. Exists so an
+		/// oversized body is rejected WHILE being read rather than after it is all in memory: the parse
+		/// path above never materializes the full payload, so there is nothing to measure at the end.
+		/// </summary>
+		private sealed class CeilingStream : Stream
+		{
+			private readonly Stream _inner;
+			private readonly long _max;
+			private long _read;
+
+			internal CeilingStream(Stream inner, long max)
+			{
+				_inner = inner;
+				_max = max;
+			}
+
+			public override int Read(byte[] buffer, int offset, int count)
+				=> Count(_inner.Read(buffer, offset, count));
+
+			public override async Task<int> ReadAsync(
+				byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+				=> Count(await _inner.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false));
+
+			private int Count(int read)
+			{
+				_read += read;
+				if(_read > _max)
+					// Not a truncation: a partial JSON document is a parse error dressed as data, so the
+					// whole payload is refused. Same policy as Gunzip's.
+					throw new InvalidDataException($"payload exceeded {_max} bytes");
+				return read;
+			}
+
+			public override bool CanRead => true;
+			public override bool CanSeek => false;
+			public override bool CanWrite => false;
+			public override long Length => throw new NotSupportedException();
+			public override long Position
+			{
+				get => throw new NotSupportedException();
+				set => throw new NotSupportedException();
+			}
+			public override void Flush() { }
+			public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+			public override void SetLength(long value) => throw new NotSupportedException();
+			public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 		}
 
 		/// <summary>

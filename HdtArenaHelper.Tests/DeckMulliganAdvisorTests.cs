@@ -354,6 +354,34 @@ namespace HdtArenaHelper.Tests
 		}
 
 		[Fact]
+		public void DIVINE_SHIELD_answers_the_one_health_rule_before_it_is_asked()
+		{
+			// Seen live: Hardlight Protector, a 2/1 Mech WITH Divine Shield, was told "1 health, dies
+			// to Ghoul Charge". It does not — the shield eats the first instance of damage whatever
+			// its size, so the ping bounces and the Charge Ghoul trades itself for the shield. The
+			// control is the same hero power against a plain 2/1, which really does die for free.
+			var deck = DeckOf((CheapBody, 30));
+			var ghoul = HeroPower(HSHeroPower.GhoulCharge);
+
+			var shielded = Advisor.Evaluate(new[] { Dbf(HSCard.HardlightProtector) }, deck,
+				CardClass.PALADIN, onCoin: false, ghoul);
+			var bare = Advisor.Evaluate(new[] { Dbf(FragileTwoDrop) }, deck,
+				CardClass.PALADIN, onCoin: false, ghoul);
+
+			Assert.Equal(MulliganVerdict.Keep, shielded[0].Verdict);
+			Assert.NotEqual(MulliganVerdict.Keep, bare[0].Verdict);
+			Assert.Contains("1 health", bare[0].Reason ?? "");
+
+			// Argent Squire is the canonical case — a 1-mana 1/1 that every player keeps precisely
+			// because the shield makes its one health irrelevant. Pinned against the Mage ping too,
+			// which is the other hero power that kills a bare one-health body for free.
+			var squire = Advisor.Evaluate(new[] { Dbf(HSCard.ArgentSquire) }, deck,
+				CardClass.PALADIN, onCoin: false, HeroPower(HSHeroPower.Fireblast));
+
+			Assert.Equal(MulliganVerdict.Keep, squire[0].Verdict);
+		}
+
+		[Fact]
 		public void A_top_end_card_that_UPGRADES_WHILE_HELD_is_not_simply_too_slow()
 		{
 			// Same shape as the trade-upside rule: holding it IS the plan, so the printed cost is not
@@ -607,6 +635,129 @@ namespace HdtArenaHelper.Tests
 
 			Assert.NotEqual(MulliganVerdict.Keep, first[0].Verdict);
 			Assert.Equal(MulliganVerdict.Keep, second[0].Verdict);
+		}
+
+		[Fact]
+		public void A_cheap_summon_SPELL_counts_as_one_of_the_decks_early_plays()
+		{
+			// The class had two notions of an early play and they disagreed: judging one card, a cheap
+			// spell that summons IS an early play (the Mining Casualties rule), while counting the
+			// DECK's early plays saw only minions, weapons and locations — so the same card existed on
+			// one side of the class and not the other. Pinned because the two must mean the same thing,
+			// NOT because a wrong verdict was demonstrated: the one live case that looked like one was
+			// traced against the wrong deck state, and the widened window was justified there.
+			//
+			// The fixture is the shape that separates the two definitions: thin in bodies, rich in
+			// cheap summon-spells. The
+			// control is the same deck with the spells replaced by removal, which really does leave
+			// nothing to play on turn two and so must still widen the window.
+			var summonSpells = DeckOf((CheapBody, 5), (BigBody, 12), (HSCard.MiningCasualties, 13));
+			var deadSpells = DeckOf((CheapBody, 5), (BigBody, 12), (CheapSpell, 13));
+			var hand = new[] { Dbf(ThreeDropBody) };
+
+			var curvesOut = Advisor.Evaluate(hand, summonSpells, CardClass.DEATHKNIGHT, onCoin: false);
+			var thin = Advisor.Evaluate(hand, deadSpells, CardClass.DEATHKNIGHT, onCoin: false);
+
+			Assert.NotEqual(MulliganVerdict.Keep, curvesOut[0].Verdict);
+			Assert.Equal(MulliganVerdict.Keep, thin[0].Verdict);
+			// And when the window IS the reason, the reason says so rather than calling a 3-drop cheap.
+			Assert.Contains("turn 3", thin[0].Reason ?? "");
+		}
+
+		[Fact]
+		public void An_OUTCAST_card_is_judged_by_WHERE_IN_THE_HAND_it_sits()
+		{
+			// The first positional rule here, and the asymmetry is the whole content: Outcast fires
+			// only from the left- or right-most card in hand, and those two edges are not the same
+			// thing. LEFTMOST is stable — nothing arrives to its left, so the Outcast you see is the
+			// one you get. RIGHTMOST is not: a card always arrives on the right before turn 1 (your
+			// own draw going first, the Coin going second), so its Outcast is already gone. The MIDDLE
+			// is dead now and only wakes up once the cards left of it have been played or thrown away.
+			//
+			// The same card, the same deck, three positions: only the index changes.
+			var deck = DeckOf((BigBody, 28), (TwoDropBody, 2));
+			var sage = Dbf(HSCard.WaywardSage);
+			var filler = Dbf(BigBody);
+
+			var left = Advisor.Evaluate(new[] { sage, filler, filler }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+			var middle = Advisor.Evaluate(new[] { filler, sage, filler }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+			var right = Advisor.Evaluate(new[] { filler, filler, sage }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Keep, left[0].Verdict);
+			Assert.Equal(MulliganVerdict.Situational, middle[1].Verdict);
+			Assert.Equal(MulliganVerdict.Situational, right[2].Verdict);
+			Assert.Contains("Outcast", middle[1].Reason ?? "");
+			Assert.Contains("Outcast", right[2].Reason ?? "");
+			// The two edges are told apart in words, since the reason is the whole product here: one
+			// says the draw takes the edge, the other names the cards that have to move first.
+			Assert.NotEqual(middle[1].Reason, right[2].Reason);
+
+			// The control that makes this about OUTCAST rather than about position: a card with no
+			// Outcast at all is unaffected wherever it sits.
+			var plainRight = Advisor.Evaluate(new[] { filler, filler, Dbf(CheapBody) }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+			Assert.Equal(MulliganVerdict.Keep, plainRight[2].Verdict);
+		}
+
+		[Fact]
+		public void The_OUTCAST_rule_reads_the_TAG_and_not_the_word()
+		{
+			// The pool is full of cards that NAME Outcast without having one — Illidari Studies
+			// discovers them, Line Hopper discounts them, Redeemed Pariah pays you for playing them,
+			// Glaivetar's reminder line merely mentions them. Measured through the rule: 35 collectible
+			// cards carry the tag and 13 more only say the word, so a text match would attach a
+			// positional demotion to all 13. Line Hopper is a plain 3-mana 3/4 and must keep its
+			// verdict on the right edge exactly as any other body would.
+			var deck = DeckOf((BigBody, 29), (TwoDropBody, 1));
+			var filler = Dbf(BigBody);
+			var verdicts = Advisor.Evaluate(new[] { filler, filler, Dbf(HSCard.LineHopper) }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Keep, verdicts[2].Verdict);
+			Assert.DoesNotContain("Outcast", verdicts[2].Reason ?? "");
+
+			// Paired with a card that really does carry the tag, in the same seat: without it this
+			// asserts only that nothing happens, which a missing rule satisfies just as well.
+			var tagged = Advisor.Evaluate(new[] { filler, filler, Dbf(HSCard.WaywardSage) }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+			Assert.Equal(MulliganVerdict.Situational, tagged[2].Verdict);
+		}
+
+		[Fact]
+		public void A_dead_OUTCAST_can_only_DEMOTE_a_keep_and_never_rescue_a_toss()
+		{
+			// The rule is one-way by construction, and it has to be: it is self-referential —
+			// mulliganing rearranges the very positions it reads — so it may state a fact and must
+			// never act on one. Demoting a Keep to Situational asserts nothing about what to do, and
+			// so leaves the hand it measured alone; a Toss or a promotion would not.
+			//
+			// Midnight Wolf is a 6-mana Outcast minion: the top-end rule tosses it on a mediocre score,
+			// and sitting on the dead right edge is not a reason to hold it. Pinned so that a version
+			// reaching for "Situational whenever Outcast is off" fails here.
+			var advisor = new DeckMulliganAdvisor();
+			advisor.SetScoreSource(_ => 40.0);
+			var deck = DeckOf((CheapBody, 30));
+			var verdicts = advisor.Evaluate(
+				new[] { Dbf(CheapBody), Dbf(CheapBody), Dbf(HSCard.MidnightWolf) }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Toss, verdicts[2].Verdict);
+		}
+
+		[Fact]
+		public void A_position_claim_is_not_made_about_a_list_that_is_not_a_HAND()
+		{
+			// Gated on a real opening hand, the same gate the dead-hand rule uses and for the same
+			// reason: a one- or two-card list is a caller isolating a single card, and "this card is in
+			// the middle of your hand" is not something that can be said about it.
+			var deck = DeckOf((BigBody, 28), (TwoDropBody, 2));
+			var verdicts = Advisor.Evaluate(new[] { Dbf(BigBody), Dbf(HSCard.WaywardSage) }, deck,
+				CardClass.DEMONHUNTER, onCoin: false);
+
+			Assert.Equal(MulliganVerdict.Keep, verdicts[1].Verdict);
 		}
 
 		[Fact]

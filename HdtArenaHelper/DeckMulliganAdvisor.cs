@@ -158,6 +158,33 @@ namespace HdtArenaHelper
 			|| card.Entity.GetTag(GameTag.QUESTLINE) != 0;
 
 		/// <summary>
+		/// An OUTCAST card, read off the TAG and never the text — the same rule quests and Divine
+		/// Shield follow. It has to be the tag: the pool is full of cards that merely NAME Outcast
+		/// without having one (Illidari Studies discovers an Outcast card, Line Hopper discounts them,
+		/// Redeemed Pariah pays you for playing them, Glaivetar's reminder line mentions them), and a
+		/// text match would attach a positional rule to every one of those. Counts in REPORT.md §16.
+		/// </summary>
+		internal static bool HasOutcast(Card card) => card.Entity.GetTag(GameTag.OUTCAST) != 0;
+
+		/// <summary>
+		/// Is this card's Outcast actually going to fire, given where it sits in the hand? Outcast
+		/// needs the card to be the LEFT- or RIGHT-most card in hand, and the two edges are not
+		/// symmetric:
+		///
+		/// - LEFTMOST is stable. Nothing arrives to the left of it, so the Outcast you can see is the
+		///   Outcast you will get, and the card is judged by the ordinary rules with no interference.
+		/// - RIGHTMOST is not. Before you play anything you draw — your own turn-1 draw going first,
+		///   the Coin going second — and that card takes the right edge, so a rightmost Outcast card
+		///   has already lost its Outcast by the time it could be played. Worse, the arriving card may
+		///   be expensive, so the plan cannot even be recovered by playing it out.
+		/// - the MIDDLE is dead now, and only becomes live once everything to its left has been played
+		///   or thrown away — which is a condition about cards this rule is not judging.
+		///
+		/// So only the leftmost position keeps the Outcast text live.
+		/// </summary>
+		private static bool OutcastIsLive(int index) => index == 0;
+
+		/// <summary>
 		/// A spell that puts a body on the board the turn you cast it — a 2-mana "summon two 1/1s"
 		/// is a two-drop however the card is typed.
 		///
@@ -333,8 +360,51 @@ namespace HdtArenaHelper
 			// early plays, not merely which ones share a cost.
 			var verdicts = new List<MulliganCardVerdict>(hand.Count);
 			for(var i = 0; i < hand.Count; i++)
-				verdicts.Add(Judge(hand[i]!, i, hand!, deck, onCoin, _score, verdicts, opponentHeroPower));
+			{
+				var verdict = Judge(hand[i]!, i, hand!, deck, onCoin, _score, verdicts, opponentHeroPower);
+				verdicts.Add(DemoteDeadOutcast(hand[i]!, i, hand.Count, verdict));
+			}
 			return verdicts;
+		}
+
+		/// <summary>
+		/// OUTCAST is the only POSITIONAL thing on this screen, and the only rule here with an
+		/// inter-card interaction — so it is deliberately NOT one of the first-match rules below.
+		/// It is a one-way FILTER applied after them: it can only turn a <see cref="MulliganVerdict.Keep"/>
+		/// into <see cref="MulliganVerdict.Situational"/>, never the other way and never into a Toss.
+		/// Three reasons, and the first is the one that decides the shape:
+		///
+		/// 1. **It is self-referential, and this is how that is kept honest.** Mulliganing moves the
+		///    cards you keep, so any rule reading hand position is reasoning about an arrangement its
+		///    own advice would change. A Toss on positional grounds would be incoherent — it would
+		///    rearrange the hand it just measured. A demotion to Situational is not: Situational asserts
+		///    nothing about what to do, so following it leaves the positions exactly as they were read.
+		///    The rule therefore states a fact the player can act on and refuses to act on it itself.
+		/// 2. **Only the claims that survive any mulligan are made.** The RIGHT edge is lost before the
+		///    card can be played no matter what the player throws away — a card always arrives on the
+		///    right before turn 1 — so that claim is mulligan-independent. The MIDDLE case is
+		///    conditional (it becomes live if everything left of it is played or tossed), which is
+		///    exactly why its verdict is Situational and its reason names the condition rather than
+		///    resolving it. The LEFT edge is stable, so nothing is said at all and the card keeps
+		///    whatever the ordinary rules gave it.
+		/// 3. It cannot rescue a card the other rules condemned: an Outcast card that is a dead top-end
+		///    card is still a dead top-end card, and its position says nothing about that.
+		///
+		/// Gated on a REAL opening hand, like the dead-hand rule: a one- or two-card list is a caller
+		/// isolating a single card, and "this card is in the middle of your hand" is not a claim you
+		/// can make about it.
+		/// </summary>
+		private static MulliganCardVerdict DemoteDeadOutcast(Card card, int index, int handSize,
+			MulliganCardVerdict verdict)
+		{
+			if(verdict.Verdict != MulliganVerdict.Keep || handSize < OpeningHandSize)
+				return verdict;
+			if(!HasOutcast(card) || OutcastIsLive(index))
+				return verdict;
+			return new MulliganCardVerdict(MulliganVerdict.Situational,
+				index == handSize - 1
+					? "Outcast: on the right edge, your first draw takes it"
+					: "Outcast: dead unless the cards left of it go first");
 		}
 
 		/// <summary>
@@ -390,9 +460,7 @@ namespace HdtArenaHelper
 			// 1/1s down on turn two and came back with no verdict at all, because the check asked
 			// what the card IS rather than what it does. The veto below keeps it honest — a summon
 			// that is conditional, delayed or the opponent's is not a turn-two play.
-			var isPermanent = card.Type == CardType.MINION || card.Type == CardType.WEAPON
-				|| card.Type == CardType.LOCATION
-				|| (card.Type == CardType.SPELL && !IsQuest(card) && DevelopsBoard(CleanText(card)));
+			var isPermanent = IsPermanentPlay(card);
 
 			// How far "early" reaches is a property of the DECK, not of the game. A three-drop is
 			// not an early play in the abstract, but a deck that cannot curve out has no earlier
@@ -489,7 +557,12 @@ namespace HdtArenaHelper
 				// can prove the body survives). Relaxing a rule on missing data would advise keeping a
 				// fragile body against an opponent we simply failed to read, and that error costs the
 				// board while the conservative one costs nothing.
-				if(card.Type == CardType.MINION && card.Health <= 1
+				// DIVINE SHIELD ends the question before it is asked: the shield eats the first
+				// instance of damage whatever its size, so a ping does not kill the body and the
+				// Charge Ghoul trades itself for the shield. Seen live on Hardlight Protector, a 2/1
+				// Mech WITH Divine Shield told "1 health, dies to Ghoul Charge" — it does not. Read
+				// off the card, not the text, for the same reason quests are: the keyword is a tag.
+				if(card.Type == CardType.MINION && card.Health <= 1 && !card.DivineShield
 					&& !SummonsABody(card) && !ReplacesItselfOnDeath(card)
 					&& DiesFreeToHeroPower(card, opponentHeroPower))
 					return new MulliganCardVerdict(MulliganVerdict.Situational,
@@ -497,6 +570,12 @@ namespace HdtArenaHelper
 							? "1 health, dies for free"
 							: $"1 health, dies to {opponentHeroPower.Name}");
 
+				// The reason has to name the rule that actually fired. A card kept only because the
+				// WINDOW was widened is not cheap — calling a 3-mana weapon "a cheap weapon" states
+				// something the player can see is false, and the widened window is the fact they need.
+				if(turn > EarlyCost)
+					return new MulliganCardVerdict(MulliganVerdict.Keep,
+						$"plays on turn {turn}, and the deck has little earlier");
 				return new MulliganCardVerdict(MulliganVerdict.Keep,
 					card.Type == CardType.WEAPON
 						? "a cheap weapon trades on board without spending a body"
@@ -674,18 +753,36 @@ namespace HdtArenaHelper
 		private const int BetterInSlotToDemote = 2;
 
 		/// <summary>
-		/// The deck's cheap PERMANENTS — the cards that can actually contest turns one and two.
-		/// Spells are excluded for the same reason the synergy engine's curve rule excludes them:
-		/// a deck full of cheap removal still has nothing to play on turn two.
+		/// Does this card put a permanent on the board the turn you play it? A body, a weapon and a
+		/// location do by type; a SPELL does when it summons — a 2-mana "summon two 1/1s" is a two-drop
+		/// however the card is typed, which is the Mining Casualties rule.
+		///
+		/// This exists because the answer was written TWICE and the two copies disagreed. Judging one
+		/// card counted a cheap summon-spell as an early play; counting the DECK's early plays did not
+		/// see it at all, so the same card existed on one side of the class and not the other. No wrong
+		/// verdict has been demonstrated from that — the one live case that looked like it turned out to
+		/// be traced against the wrong deck state — so this is reconciled because the two must MEAN the
+		/// same thing, not because it misfired. Note the direction it moves live advice: seeing more
+		/// cheap plays makes decks look LESS thin, which NARROWS the early window and demotes 3-drops
+		/// that used to be kept. Counts in REPORT.md §16.
+		/// </summary>
+		internal static bool IsPermanentPlay(Card card)
+			=> card.Type == CardType.MINION || card.Type == CardType.WEAPON
+				|| card.Type == CardType.LOCATION
+				|| (card.Type == CardType.SPELL && !IsQuest(card) && DevelopsBoard(CleanText(card)));
+
+		/// <summary>
+		/// The deck's cheap plays — the cards that can actually contest turns one and two, counted by
+		/// the SAME rule that judges a card in hand (<see cref="IsPermanentPlay"/>). Removal and reach
+		/// are still excluded, for the reason the synergy engine's curve rule excludes spells: a deck
+		/// full of cheap removal has nothing to PLAY on turn two.
 		/// </summary>
 		private static int CountEarlyPermanents(IReadOnlyList<Card> deck)
 		{
 			var count = 0;
 			foreach(var card in deck)
 			{
-				if(card.Cost >= 1 && card.Cost <= EarlyCost
-					&& (card.Type == CardType.MINION || card.Type == CardType.WEAPON
-						|| card.Type == CardType.LOCATION))
+				if(card.Cost >= 1 && card.Cost <= EarlyCost && IsPermanentPlay(card))
 					count++;
 			}
 			return count;

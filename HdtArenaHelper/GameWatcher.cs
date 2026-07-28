@@ -24,6 +24,7 @@ namespace HdtArenaHelper
 		private DateTime _nextPollUtc = DateTime.MinValue;
 		private bool _readErrorLogged;
 		private bool _sceneErrorLogged;
+		private SceneMode? _blockedSceneLogged;
 		private bool _gameTypeErrorLogged;
 		private int _blockedGameTypeLogged = -1;
 
@@ -50,6 +51,7 @@ namespace HdtArenaHelper
 			_nextPollUtc = DateTime.MinValue;
 			_readErrorLogged = false;
 			_sceneErrorLogged = false;
+			_blockedSceneLogged = null;
 			_gameTypeErrorLogged = false;
 			_blockedGameTypeLogged = -1;
 		}
@@ -99,7 +101,25 @@ namespace HdtArenaHelper
 			try
 			{
 				var scene = Reflection.Client.GetSceneMgrState();
-				return scene == null || (SceneMode)scene.Value.Mode == Scene;
+				if(scene == null)
+					return true; // unreadable: fail permissive, as documented above
+				var mode = (SceneMode)scene.Value.Mode;
+				if(mode == Scene)
+				{
+					_blockedSceneLogged = null;
+					return true;
+				}
+				// The scene VALUE is logged, once per distinct one: this gate returns before PollCore, so
+				// every diagnostic inside the watcher is unreachable when it rejects — and "the plugin shows
+				// nothing and says nothing" was indistinguishable from a dead plugin. Live example: after an
+				// Underground redraft the arena deck screen reported a scene that is not DRAFT, and four
+				// minutes of total log silence were the only symptom.
+				if(_blockedSceneLogged != mode)
+				{
+					_blockedSceneLogged = mode;
+					Log($"scene {mode} is not {Scene}; {GetType().Name} staying quiet");
+				}
+				return false;
 			}
 			catch(Exception ex)
 			{

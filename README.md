@@ -106,6 +106,11 @@ free, transparent, and honest about its limits.
   all, which is the honest answer and keeps the one that matters visible — and a card nobody has
   enough games on gets silence rather than a guess, because a thinly-measured legendary looks
   average for want of data, not for want of power.
+- **Outcast is judged by WHERE the card sits in your hand**, because that is what the keyword depends
+  on. The left edge is stable; the right one is not — a card always arrives there before your first
+  turn, so a rightmost Outcast is gone before you can use it. A card in the middle is dead until the
+  cards to its left have gone. In those seats the call drops to Situational and says which it is; it
+  never tells you to toss, because throwing cards away rearranges the very positions it just read.
 - **Tells you what your deck DOES, on the run screen** — the one between matches: the minion curve,
   how much hard removal against how much damage, AoE, card draw. Counts only, no verdict: you can check
   every one of them against your own deck, which is why it needs no data to be honest.
@@ -115,6 +120,23 @@ free, transparent, and honest about its limits.
   the eleven basic hero powers answer a one-health body for nothing. Against the classes that must
   swing the hero and take the damage back, the same 2/1 becomes a keep. When the hero power cannot be
   read, the advice stays what it was: a rule is never relaxed on missing data.
+- **Your own arena rating on the run screen, and where it would put you.** Read straight from the
+  client, so it costs no request and works for every player — not only the few thousand a regional
+  leaderboard lists. When you are not listed, it also shows the rank that rating *would* enter at,
+  counted against the leaderboard already cached on your machine. Worded "would enter" and never
+  "your rank", because a listing needs a seasonal minimum of games too. Underground only: that board
+  publishes the same rating the client reports, while the Normal Arena board publishes average wins
+  per run, and placing a rating on that would be an invented number.
+- **The opponent's leaderboard rank — opt-in, and off by default.** From Blizzard's own public arena
+  leaderboards, so the data is first-party; display-only, never folded into a score. It is off until
+  you turn it on in the Plugins menu because it needs a slow background crawl of the board (one page
+  at a time, only your region, and only while you are actually playing arena), and nobody's bandwidth
+  should pay for that unasked. Shown beside your own standing for the whole match, in a different
+  colour so there is no confusing whose rank is whose. Most opponents will not resolve, for two reasons
+  that both matter: the board covers only a few thousand players per region, and a listing requires a
+  seasonal minimum of games — measured live, a rating well above the board's own threshold was still
+  absent. So "not on the leaderboard" says nothing about how good someone is, and nothing here pretends
+  it does: a name the crawl has not finished looking for says "checking", not "not listed".
 - **Stays out of your other games** — the in-game overlay appears only in an actual Arena match,
   so Battlegrounds, ranked and brawls are untouched.
 - **Self-updating** — checks this repo's public releases once a day and stages the new build for
@@ -246,6 +268,7 @@ vulnerability.
 |---|---|
 | [HSReplay](https://hsreplay.net/) arena API | Real arena win-rate / popularity per card and class (free, public) |
 | [HearthDb](https://github.com/HearthSim/HearthDb) (ships with HDT) | Card metadata — costs, statlines, tribes, keywords, text |
+| Blizzard's own public [arena leaderboards](https://hearthstone.blizzard.com/en-us/community/leaderboards) | The opponent's rank and rating, if they are listed — first-party, display-only, opt-in |
 
 The feed is scoped to **Underground Arena** and to recent games (a 4-day window, stated in the
 payload itself). So no pre-patch games dilute a score — and if you play normal Arena, the numbers

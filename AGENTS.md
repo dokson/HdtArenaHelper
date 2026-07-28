@@ -64,6 +64,124 @@ never scrape a paywalled service or bundle/redistribute anyone's data.
 |---|---|---|
 | HSReplay arena `api/v1/arena/card_stats/free/` | Real arena win-rate / popularity per card + class tier list | ✅ used — the ONLY win-rate source, weight 1.0, and also the training target |
 | HearthDb (bundled with HDT) | Card metadata for the offline heuristic, the mulligan advisor and id resolution | ✅ used, offline |
+| Blizzard `hearthstone.blizzard.com/.../api/community/leaderboardsData` | The CURRENT ARENA OPPONENT's public rank/rating, if they are on it | ✅ used — first-party (Blizzard itself, not a third party), display-only, never blended into any score |
+
+**The opponent leaderboard lookup is first-party, but the "publicly reachable" trap still applies to
+HOW it is fetched.** Blizzard's own leaderboard API (`ArenaLeaderboardSource.cs`) has no name-search
+parameter and no page-size override, so finding one player means knowing which page they are on.
+Two designs were considered and rejected for the reason this section exists:
+
+- **Re-scanning the whole leaderboard on every lookup** (page 1 through ~391 per region) costs
+  hundreds of requests for the common case — an opponent who is not on it — every single match. The
+  weekly HSReplay retrain already sets the bar: rare, single-shot. A per-match full scan is neither.
+- **A shared always-on scraping server**, the design `HDT_BGrank` uses for Battlegrounds (a paid VM
+  re-scraping continuously): this project has never hosted infrastructure, and it would hit Blizzard
+  from one address on a fixed schedule regardless of how many players are actually looking anything
+  up — the volume argument above, just moved off this project's own client.
+
+Instead this mirrors the desktop app `Arena-Tracker` (`supertriodo/Arena-Tracker`,
+`Sources/arenahandler.cpp`): **each installed client crawls the leaderboard for itself**, one page at
+a time in the background, paced (`CrawlPageDelay`) rather than fired back-to-back, and PERSISTS its
+progress to disk so a restart resumes instead of re-crawling from page 1. Traffic scales with how much
+the client has run, not with how many arena matches are played or how many users installed the plugin.
+A player the crawl has not reached yet is reported as "not found" — never an on-demand scan.
+
+**Only the region the player is CURRENTLY on is crawled.** Regions are separate shards, so an arena
+opponent is always on the caller's own region: the other two boards hold nobody this client can be
+matched against, and crawling them would triple the traffic for rows no lookup could ever read. Do not
+"generalize" the crawl back to every region — that is not thoroughness, it is unusable bytes taken off
+Blizzard. `EnsureCrawling` therefore takes a region, and the caller passes the one it just resolved.
+
+**The crawl has NO terminal state, and that is the fix for two bugs at once.** A rollover is only
+detectable from a fetched page, so a crawl that stopped at the end of the board served last season's
+ranks as current indefinitely — across restarts too, since the cursor is persisted. So the last page
+WRAPS to page 1 and the crawl keeps going. Consequences a change here must preserve:
+
+- **The pace is derived, never written as a number of seconds.** The first pass runs fast
+  (`FirstCrawlPageDelay`) because until it completes almost every opponent reports "not found", which
+  is indistinguishable from a broken plugin. After that the per-page delay is computed so that one
+  pass takes `FullRefreshInterval`, floored by `MinRefreshPageDelay`. Deriving it is the point: page
+  counts move with the season, and a hard-coded delay would silently redefine the refresh period every
+  time they did. `FullRefreshInterval` is **24 h**, and it must not be shortened without an argument
+  that survives the arithmetic in REPORT.md §17: at 2 h, ~100 installs in one region would make ~60x the
+  hourly request volume of the always-on scraping server that **Data sources & ethics** rejects as
+  impolite — from 100 addresses rather than one. A shorter interval also buys nothing observable, because
+  the Arena figure is a season average that moves by ~0.01 per run.
+- **Traffic follows DEMAND, not uptime.** The crawl stops after `ActivityWindow` without an arena match
+  and resumes from the persisted cursor at the next one. Without this the crawl ran for the whole HDT
+  session after a single arena match — while drafting, in Battlegrounds, or with nobody at the machine
+  — which is the only traffic here that buys nothing, and it made this file's own claim that traffic
+  scales with client use false rather than merely optimistic.
+- **One crawl per CLIENT, not per board.** `_activePair` holds the single (kind, region) allowed to
+  crawl, and another pair taking over makes the previous one stop at its next step. A pacing budget is
+  a politeness budget, so it belongs to the client: without this, a player who plays both Arena and The
+  Underground ran two perpetual crawls at double the traffic, and a mid-session region switch started a
+  third while never stopping the first.
+- **A rollover restarts from page 1**, not from wherever it was noticed — advancing would leave the new
+  season's best ranks unfetched until the next wrap. This was a real bug, and the page-1-only rollover
+  test could not see it.
+- `totalPages` is clamped by `MaxPageCeiling`: it drives the loop, so it is a control-flow input from
+  an untrusted payload, not a display value.
+- **A failed page is retried only when the failure is TRANSIENT**, at most `MaxFetchAttempts` times with
+  a backoff. The distinction is an ethics rule, not a robustness one: a timeout, a dropped connection or
+  a 5xx means the server did not refuse us, while **a 4xx is Blizzard declining** — including the 403/429
+  a rate limiter would send — and retrying into a refusal is what **Data sources & ethics** forbids. An
+  unparseable body is Permanent too (a format change, not a blip), and so is anything unknown, so the
+  failure mode is "stop" rather than "hammer". Without any retry a single blip ended the pass, which at a
+  24-hour pace costs days of coverage; unbounded, an outage would turn the crawl into a hammer.
+- Because the crawl never ends on its own, **cancellation is mandatory** — `Dispose` from `OnUnload`
+  and from the menu toggle. A disposed source never crawls again, so both re-enable paths build a
+  fresh one.
+
+**"Not on the leaderboard" does NOT mean "below the cutoff", so infer nothing from it.** Measured on a
+live client: a player whose Underground rating sat well above the board's rating threshold (the floor was
+a round number, with nothing at or below it) and would have placed them in the lower half of the board
+was nonetheless absent — because a **seasonal minimum of games (~30) gates the listing**.
+That minimum is nowhere in the payload (`seasonMetaData` has no dates and no requirements, only a
+`season_id` and an authenticated `href`), so it is player-side knowledge: do not hard-code it and do not
+compute a countdown from it. An absent row says nothing about a player's strength, and no display or
+wording may suggest otherwise. Numbers: REPORT.md §17.
+
+**The local player's own rating needs NO leaderboard and no network.**
+`Reflection.Client.GetArenaRatingInfo()` returns it from the client, so it works for every player rather
+than only the few thousand a regional board publishes — the crawl exists solely for the OPPONENT.
+Verified live that `UndergroundRating` is exactly the number the game shows AND the same integer that
+board publishes — the two matched exactly — so it needs no conversion and a client rating can be located
+on that board. **The difference is in what the BOARDS publish, not in the client's two fields**: both of
+those are ratings on the same sort of scale, but the Normal Arena board publishes **average wins per run**
+(a single-digit decimal) instead of a rating, and no factor converts a rating into an average number of
+wins — a x100 reading was tried and refuted (REPORT.md §17). So a client rating can never be placed on the Normal Arena board; only a name lookup
+works there. Both values are printed exactly as stated, and a "conversion factor" is not a fix.
+
+**The lookup returns EVERY holder of a display name, never one.** `accountid` carries no discriminator
+and a display name is not unique, so two players can share one. Calling that "a rare, accepted mismatch
+risk" is not good enough without measuring either word: measured, 14 of 1,910 names on a real board
+repeat, and their holders sit hundreds of ranks apart. Keying a name to a single row lets the last one
+win — and since the crawl walks pages in rank order, that is systematically the WORST holder's rank: a
+real rank under the wrong player's name, exactly what the region whitelist refuses. Hence `FindAll`, returning a
+list ordered best rank first, and a caller that must present several holders as ALTERNATIVES rather than
+pick one. Sharing is a property of a PASS, so an entry collapses back to one holder when the duplicate
+leaves the board, and the extra holders are persisted — a restart mid-pass would otherwise forget and
+start answering with one player as if they were the only one. Numbers: REPORT.md §17.
+
+**The whole feature is opt-in and OFF by default**, toggled from the plugin menu ("Opponent leaderboard
+rank", persisted in `leaderboard.pref`). Unlike auto-update's default, this one is off because the
+crawl is continuous background traffic against Blizzard's own site for as long as HDT runs, and the
+result currently reaches only the log. Turning it off disposes the source immediately rather than
+waiting for unload: switching it off IS the request to stop using someone else's bandwidth. With it
+off, no crawl is ever started — the pref is checked on the lookup path, before anything is created.
+
+CHINA is excluded from region lookups, and the endpoint's behaviour is why the whitelist is
+load-bearing rather than cosmetic: verified against the live endpoint, `region=CN` — like a garbage
+region and like an empty one — silently returns **EU's** rows and echoes `"region":"EU"` back, so
+querying it would show a real rank under the wrong player's name rather than nothing. An invalid
+`leaderboardId` falls back just as silently, to a different board whose rows carry no rating at all.
+China has a separate API host entirely, not this endpoint. Numbers and the row-hash comparison behind
+all of this: REPORT.md §17.
+
+**Display-only, like the class win-rate label**: a rank/rating is shown beside the opponent, never
+folded into any score — there is nothing here for a blended number to be calibrated against, and
+"how good is my opponent" is not a question this project's scoring answers.
 
 **The card pool is COMMITTED to this repo** — `docs/hearthstone-{cards,hero-powers,heroes}.md` to
 grep and `Generated/HSDatabase.g.cs` for the test projects to compile — and that is a redistribution, so
@@ -293,9 +411,12 @@ whole deck, on the UI thread.
 | File | Responsibility |
 |---|---|
 | `ArenaHelperPlugin.cs` | `IPlugin` entry point; wires sources, warms data off-thread with retry, drives all overlay render/visibility from `OnUpdate` (wrapped in try/catch), suppresses/restores HDT's native overlay via a persisted pref file |
+| `OverlayState.cs` | Which of our screens is showing, and whether the overlay should be visible — the whole rule, extracted PURE (no WPF, no HearthMirror, no logging) so it can be tested. It exists because this decision produced **four** overlay bugs, every one found by a person watching a live client: three ghosts (the run panel over a Battlegrounds game, the previous mode's run after a mode switch, a panel outliving its screen) and one inverse — a panel that vanished for the rest of the arena screen because the fix for the first was hung on the wrong event. The distinctions it encodes, each paid for: the draft PANEL ending is not the arena SCREEN ending (the run summary must survive the first, since it also fires while the player stays in arena, and the watcher's dedup will not raise it again); the RUN screen can stop being reported while the player is still in arena, so it needs a teardown of its own; and match standings are a SECOND, independent reason to be visible, because in a game there is no screen of ours outside a mulligan or a Discover. That last one widens the rule the ghosts came from, so it is gated by construction — set only from the arena-match-gated opponent watcher, cleared when the opponent goes — never by a new game-type read. `OverlayStateTests` is one test per bug; re-introduce any of them and the matching test goes red (verified both ways). Render dedup is deliberately NOT reset per teardown any more: it is derived from there being no screen, because the old per-path reset had to be repeated everywhere and a path that forgot it froze the panel |
 | `GameWatcher.cs` | Template method for everything that polls the client: the base owns the 500 ms throttle, the **scene gate**, the **arena-match gate** and log-once-per-failure-streak; subclasses implement only their client read (`PollCore`), their dedup key and their "screen gone" event. The gate is why the base exists rather than three copies — **both ghost-overlay bugs this project had came from a watcher acting on state belonging to another screen**, and the gate had already been copied byte-identical into two pollers. Deliberately NOT in the base: dedup and the gone-event, which genuinely differ (`DraftChoices.Version` vs an offered-id signature vs `EndDraft`'s showing-state semantics). The **arena-match gate** (`ArenaMatchOnly`, opt-in, on both GAMEPLAY watchers) is the third ghost-overlay bug, and the lesson is narrower than the scene gate's: an arena RUN being open is NOT the same as the current MATCH being arena. The run persists across modes, so with a 30-card Paladin run in progress a **Battlegrounds** hero/trinket choice arrived through the same choice zone on the same GAMEPLAY scene and was scored with arena win-rates — live, and bad enough that the user disabled the plugin mid-game. The gate reads `Reflection.Client.GetGameType()` against the four arena types (`GT_ARENA`, `GT_UNDERGROUND_ARENA`, + their `_PLAYER_VS_AI` variants). It fails permissive ONLY where the client says nothing — an unreadable type, or the `GT_UNKNOWN` reported for a moment as a game starts, which is precisely the mulligan's window; a type the client states and that is not arena is a definite no, and an id HearthDb does not know is not arena either. Do not re-derive "are we in arena" from `GetArenaDeck()` in a new watcher: that is the check that was already there and did not hold |
 | `MulliganWatcher.cs` | The mulligan screen: `GetMulliganState()` ordered by the client's `ZonePosition` (the overlay places one column per card, so a misordered or partial hand does not degrade — it lies), gated on GAMEPLAY + an arena MATCH (`ArenaMatchOnly`, see `GameWatcher.cs`) + an arena run + a known class. It also carries the **run deck** (the advice is judged against it, so no deck means no event) and the **coin**, which is read from the hand SIZE — 3 cards going first, 4 going second — because the Coin is not dealt into the mulligan hand and a rule beats a field read that can fail |
 | `IMulliganAdvisor.cs` / `DeckMulliganAdvisor.cs` | The mulligan advice, and why it can exist without anyone's data: a mulligan question is not "is this card good" (the draft score answered that) but "is it good in THIS hand given the other 27 cards". Ordinal verdict (Keep / Toss / **Situational**, the default and most common answer) plus the fact behind it in words — never a percentage, because a keep-rate would have to be invented, which is the mistake REPORT.md measured. **The model is TEMPO x QUALITY**, and the rules are in [Mulligan rules](#mulligan-rules) below |
+| `OpponentIdentityWatcher.cs` | Reads the current arena opponent's BattleTag from `Reflection.Client.GetMatchInfo().OpposingPlayer.BattleTag` — the same tag Blizzard's own leaderboard reports as `accountid` — so it can be looked up on `ArenaLeaderboardSource`. Gated GAMEPLAY + `ArenaMatchOnly` like `MulliganWatcher`. LOG ONLY for now: no overlay row exists yet, because placing one needs a live-client screenshot to anchor against (see the anchors table) |
+| `ArenaLeaderboardSource.cs` | Looks the current opponent up on Blizzard's own public arena leaderboards (first-party, not scraped from a third party) — rank + rating, if they happen to be on it. No name-search endpoint and no page-size override exist, so each installed client crawls the leaderboard for itself, one page at a time in the background, and persists progress to disk (mirrors the desktop app `Arena-Tracker`, not `HDT_BGrank`'s always-on server — see **Data sources & ethics**). Only the player's CURRENT region is crawled (regions are separate shards; the others are unmatchable bytes), gzip is requested explicitly because `WebClient` does not and ~99.5% of each raw page is repeated metadata, and a completed region re-reads page 1 after `CompletedRecheckInterval` so a season rollover is ever noticed. Ratings are reported exactly as the feed states them — the Underground column has no documented scale, and an assumed ÷100 was removed. CHINA is excluded: the endpoint silently serves EU's rows for it, as it does for any unrecognized region |
 | `GameStateFacts.cs` | What the BOARD says about an in-game choice, in words beside the score and **never folded into it**: hand full (a discovered card is destroyed — reported first because it is the only irreversible one), board full for a minion, and cost above available mana. These follow from the rules, so they need no fitting; what no public data provides is their VALUE in points, and inventing one is the mistake REPORT.md already measured. An unreadable board makes every rule silent — the failure mode to avoid is printing "needs 7 mana, you have 0" over a playable turn |
 | `CardChoiceWatcher.cs` | In-game card choices (Discover): polls `GetCardChoices()`, gated FIRST on the active scene being `GAMEPLAY`, then on the current MATCH being arena (`ArenaMatchOnly` — Battlegrounds is GAMEPLAY too and delivers its hero/trinket picks through this very zone), and only then on being in an ARENA run, which supplies the class context. Every number here is an arena win-rate, so outside arena there is none we are entitled to show. Dedup is on the offered-id list (no `Version` field exists here). Pure decision extracted to `BuildChoicePlan` for testing, like `BuildDeckEditPlan`; **all** offered ids must resolve or the choice is voided, because plaques are laid out by index and a partial list puts every score on the wrong card |
 | `DraftWatcher.cs` | Reads offered cards + `Packages` via HearthMirror (`GetArenaDraftChoicesV3`), dedup by `Version`, throttled to 500ms, cardId→dbfId; `Reset()` on (re)enable. Also handles the redraft **`EDITING_DECK`** deck-review phase. **Four gates and two invariants, each added after a live ghost-overlay or frozen-panel bug — see [Draft watcher gates](#draft-watcher-gates-and-invariants) below** |
@@ -308,7 +429,7 @@ whole deck, on the UI thread.
 | `ArenaCardScore.cs` | The per-option score record the overlay renders |
 | `PlaqueTier.cs` | Pure 0-100 score → 1-5 plaque tier map (WPF-free, unit-tested) |
 | `HeroPowerThreat.cs` | Classifies the OPPONENT's hero power into how cheaply it answers a small body: `DirectDamage` (Fireblast), `ChargeToken` (the DK Ghoul, which trades the turn it lands), `HeroAttack` (Shapeshift/Demon Claws/Dagger Mastery — kills the body but eats its attack, the 2/1-vs-3/1 distinction), `None`. Keyed on the CARD, never the class: dual-class arena heroes do not identify a hero power. Derived from text, and the pool corrected a from-memory list twice — Paladin's Reinforce does NOT answer a body (no Charge) while the DK Ghoul does, and Steady Shot is FACE-ONLY even though HearthDb ships its text twice, once unrestricted; reconciled via the repeated "Hero Power" label, since letting the bare clause win put Hunter among the pingers. Read live from HDT's `Core.Game.Opponent.PlayerEntities` (`IsHeroPower && IsInPlay`) — HearthMirror does NOT carry it, verified across all 76 `IReflection` methods, `MatchInfo.Player` and `MulliganState`. Confirmed readable at the mulligan on a real client |
-| `DeckMechanics.cs` | What the deck DOES, in counts: minion curve (same buckets and same MINIONS-ONLY rule as the synergy engine's curve), hard removal, damage cards of any type, AoE, draw. **Descriptive only** — it asserts no value, which is why it is the one deck-level feature needing no validation. Every count reuses a `BuildFeatures` feature, so it cannot drift from the model and introduces no new text patterns. Log-only until the overlay row is placed on a live client |
+| `DeckMechanics.cs` | What the deck DOES, in counts: minion curve (same buckets and same MINIONS-ONLY rule as the synergy engine's curve), hard removal, damage cards of any type, AoE, draw. **Descriptive only** — it asserts no value, which is why it is the one deck-level feature needing no validation. Every count reuses a `BuildFeatures` feature, so it cannot drift from the model and introduces no new text patterns. It is SHOWN on the run screen (the panel above the deck stats) and deliberately **NOT** shown during the redraft's `EDITING_DECK` phase — a maintainer decision, not an unfinished one: that screen already carries the scored cut list down the whole left edge, and the question there is which cards to drop rather than what the deck does. It stays computed and LOGGED on that path, which is where to read it. **Do not "finish" this by adding a panel to the redraft screen** — this row used to say "log-only until the overlay row is placed", which read as pending work and invited exactly that |
 | `CardText.cs` | Card text prepared for matching, and the ONE home for the whitespace convention. Two normalized forms, deliberately not unified: `Normalized` (localized text, markup stripped, lower-cased, **newlines kept**) is what the heuristic's ridge weights were fit against, so collapsing there would move every golden score and need a refit; `Flattened` collapses whitespace for callers no fitted model depends on. `WithFlexibleSpaces` rewrites a pattern's spaces as `\s+`. It exists because the tooltip-line-break bug was found twice in two files — fixed in the mulligan advisor, then paid for again in the synergy engine |
 | `ISynergyEngine.cs` / `MetadataSynergyEngine.cs` | Synergy contract + the metadata engine. Rules, bounds and the traps behind each guard: see **Synergy engine** above — do not restate them here |
 | `ArenaOverlayWindow.cs` | Borderless click-through overlay hosting HDT's native `ArenaPlaque` (hand-drawn fallback) in a 4:3 `Viewbox` design-space; class/name label under each plaque; `SetDeckReview` renders the redraft edit phase's deck panel — the WHOLE deck in the game's order (cost, then name) with an HDT-style score badge per row and the suggested cuts shaded red-to-yellow by cut rank, as a full-height column on the LEFT edge (rows share the client height; clamped so a row can neither clip the badge nor stretch into a menu); poll-driven show/hide. **Do not try to align badges onto the game's own "Your Deck" list**: measured live, the redraft deck has 23–28 distinct rows against the ~21 that list shows, so it always scrolls, and the scroll offset is not readable from the client. That version was written, shipped dormant behind a 22-row guard, and never once fired |
@@ -399,6 +520,10 @@ absolute judgement survives only at the **top end**, where there is no slot to c
 the card's own quality can say whether something uncastable for five turns is worth holding. Three exemptions to that last one, each from a real
 card:
 
+- it has **DIVINE SHIELD**, which settles the question outright: the shield eats the first instance of
+  damage whatever its size, so the ping bounces and the Charge Ghoul trades itself for the shield.
+  Read off the card, never the text. Hardlight Protector, a 2/1 Mech with Divine Shield, was being
+  told it dies to Ghoul Charge;
 - it **summons a second body** (Maze Guide's 1/1 dies, the 2-drop beside it does not);
 - it **pays you when it dies** (Loot Hoarder draws, Sinful Sous Chef hands you two cards — so the hero
   power that kills it costs the opponent a turn and gains them nothing);
@@ -443,6 +568,31 @@ counts, and a card with a trade upside counts as an early play for the same reas
 Self-discounting cards and measured bombs stay exempt; an UNSCORED expensive card does not, which is
 what closes the live gap.
 
+**OUTCAST is POSITIONAL, and the two edges are not symmetric.** Read off `GameTag.OUTCAST`, never the
+text: the pool holds cards that merely NAME Outcast without having one (Illidari Studies discovers one,
+Line Hopper discounts them), and matching the word would attach a positional claim to cards whose
+position is irrelevant — the `demons?`-matches-"Demon Hunter" trap again. **LEFTMOST is stable**, so
+nothing is said and the ordinary rules stand. **RIGHTMOST is not**: a card always arrives on the right
+before turn 1 (your draw going first, the Coin going second), so the Outcast is gone before it can be
+played and the card must be judged on its body alone. **The MIDDLE is dead now** and only wakes once
+everything left of it has been played or thrown away.
+
+This is the **only rule with an inter-card interaction, and it is self-referential** — mulliganing
+rearranges the very positions it reads — which dictates its shape. It is NOT one of the first-match
+rules: it is a one-way FILTER applied after them, able only to turn a Keep into Situational, never
+into a Toss and never the other way. That is what keeps it coherent: Situational asserts nothing about
+what to do, so acting on it leaves the positions as they were read, whereas a positional Toss would
+rearrange the hand it just measured. Only claims that survive any mulligan are made — the right edge
+is lost whatever the player throws away; the middle's condition is named rather than resolved. Gated
+on a REAL opening hand, like the dead-hand rule.
+
+**"Early play" has ONE definition** (`IsPermanentPlay`), shared by the per-card judgement and by the
+count of the DECK's early plays that widens the window. It was written twice and the two disagreed: a
+cheap summon-spell was an early play when a card was judged and invisible when the deck was counted.
+Reconciling them makes decks look less thin, which NARROWS the window — a change in live advice, so
+treat the shared count as a decision and not a cleanup. No wrong verdict was ever demonstrated from
+the disagreement; measurements and the per-class spread are in REPORT.md §16.
+
 **A 1-mana quest** wants to be down on turn 1. **The Coin** is an effective-turn shift plus a
 `GameTag.COMBO` enabler. **A HERO card, or one whose printed cost is not its real cost** (self-discounting,
 modular) gets no verdict at all.
@@ -474,6 +624,15 @@ empty while HDT starts, so a draft already open at startup resolved nothing, fir
 showed a blank overlay and then deduped that pick forever. A partially resolved pick is worse than
 none: plaques are laid out by index, so N−1 of them centred as if there were N puts every score on the
 wrong card.
+
+**Invariant 0: every screen kind a watcher can raise must be cleared by that watcher's "gone" handler.**
+Overlay visibility is driven purely by whether a screen is active (`want = _dataReady && screen != null`)
+with NO scene or game-type check at render time, so a kind missing from the teardown stays on screen for
+the rest of the session. `OnDraftEnded` cleared the draft and deck-review kinds but not the run summary,
+and the run panel sat on top of a live **Battlegrounds Duo** game — the fourth ghost overlay this project
+has had, and the log shows exactly how it looks: `draft ended` with no `overlay hidden` after it, then
+`overlay shown` again with no new screen event. Nothing enforces the list, so adding a screen kind means
+adding it to the teardown in the same change.
 
 **Invariant 1: the deck panel's visibility must NOT hinge on deck SIZE.** The client reports the
 `EDITING_DECK` phase two different ways across sessions — both in the HDT log, same build: `deckSize=30`
