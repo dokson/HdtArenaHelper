@@ -515,10 +515,22 @@ question ("is this card good") inside a class built to answer "is it your best p
 the other 27 cards". Wild Pyromancer is genuinely below average for a Mage and still the right keep in
 a deck with nothing better at two mana. So the score is a COMPARISON within the same cost — the same
 notion of "slot" `secondOfItsSlot` uses — and it takes `BetterInSlotToDemote` (2) better cards at that
-cost to demote, because one among thirty is a card you will probably not have drawn by then. The
-absolute judgement survives only at the **top end**, where there is no slot to compare within and only
-the card's own quality can say whether something uncastable for five turns is worth holding. Three exemptions to that last one, each from a real
-card:
+cost to demote, because one among thirty is a card you will probably not have drawn by then.
+
+**The top end is deck-relative too**, and used not to be — there is no slot to compare within, but there
+is still a deck. A "bomb" is one of the best cards you OWN (`BombRank`, counted per DISTINCT card: a
+duplicate is not a second answer to "is this among my best"), and an absolute bar is what failed. The
+scale is anchored on the whole pool, so a strong class sits far above the centre across the board:
+measured on a live run, most of the cards offered cleared the old bar, so the exemption fired on the bulk
+of the deck instead of its top and spared a card BELOW its own class's median from the toss. Rank
+DECIDES; a floor at the scale's own centre (`BombFloor` — the median card is 50 by construction) may only
+VETO, because the best three cards of a bad deck are not bombs and a weak deck is the one that can least
+afford to spend turns doing nothing. Ranking also needs a deck the feed actually covered, so with under
+half its distinct cards scored the answer is "cannot tell" and nothing is tossed — the direction every
+abstention here fails in. Numbers in REPORT.md §16b.
+
+**A cheap body that dies for free to a hero power is demoted**, and these four exemptions are that rule's
+— not the top end's. Each comes from a real card:
 
 - it has **DIVINE SHIELD**, which settles the question outright: the shield eats the first instance of
   damage whatever its size, so the ping bounces and the Charge Ghoul trades itself for the shield.
@@ -542,7 +554,7 @@ or the longhand "while this is in your hand". Holding it IS the plan, the same a
 something this advisor can know. **Vetoed on "in hand or deck"**, and that veto is the whole rule:
 Lotus Troublemaker's counter ticks in the deck too, so holding it buys nothing. Counts in REPORT.md §16.
 
-**The top end goes back** unless the card scores as a bomb — or unless trading UPGRADES it (`HasTradeUpside`)
+**The top end goes back** unless the card is a bomb (deck-relative — see above) — or unless trading UPGRADES it (`HasTradeUpside`)
 and turn 1 is otherwise empty, which buys value from a mana that was going to be wasted. Being Tradeable
 is not enough: a card that merely cycles still goes back, because cycling something you did not want is
 worse than the free replacement a mulligan already gives you.
@@ -564,7 +576,8 @@ have. It sits ABOVE the top-end rule on purpose, since that one abstains without
 leave the most expensive card in a dead hand unjudged; this rule needs no data, because "there is
 nothing to play before turn 4" is a fact about the hand. Gated on a REAL opening hand (`OpeningHandSize`,
 3 or 4 — a shorter list is a caller isolating one card), read in EFFECTIVE turns so the Coin already
-counts, and a card with a trade upside counts as an early play for the same reason rule 5a exists.
+counts — for the ONE card it is spent on, which makes a hand read as dead more often than when every
+card claimed it — and a card with a trade upside counts as an early play for the same reason 5a exists.
 Self-discounting cards and measured bombs stay exempt; an UNSCORED expensive card does not, which is
 what closes the live gap.
 
@@ -593,8 +606,18 @@ Reconciling them makes decks look less thin, which NARROWS the window — a chan
 treat the shared count as a decision and not a cleanup. No wrong verdict was ever demonstrated from
 the disagreement; measurements and the per-class spread are in REPORT.md §16.
 
-**A 1-mana quest** wants to be down on turn 1. **The Coin** is an effective-turn shift plus a
-`GameTag.COMBO` enabler. **A HERO card, or one whose printed cost is not its real cost** (self-discounting,
+**There is ONE Coin, so its tempo is credited to ONE card** (`CoinTarget`) — the cheapest early play in
+hand, ties leftmost. Crediting it to every card at once double-counted a single resource, and it cost a
+real verdict: the same hand read a 3-drop as "plays on turn 2" AND a 5-drop as "plays on turn 4" off one
+mana crystal, which took the 5-drop out of the top-end rule entirely and left it unjudged — going second,
+NO 5-drop was ever top end. A **top-end card is never the target**, and that exclusion is the rule rather
+than a detail: coining out a 5-drop is the fallback for a hand with nothing else to do, i.e. the hand that
+should have been mulliganed, so letting the Coin reach it made the Coin an argument for keeping the card
+the Coin was only needed because of. A hand whose cheapest play is expensive gets no shift at all. Only
+TEMPO is rationed: the Coin as a `GameTag.COMBO` enabler is a condition rather than a swing — it is a card
+played before another one whatever else the turn does — so that rule still reads the coin flag directly.
+
+**A 1-mana quest** wants to be down on turn 1. **A HERO card, or one whose printed cost is not its real cost** (self-discounting,
 modular) gets no verdict at all.
 
 Two abstentions are load-bearing: **no score and low-confidence score both mean silence**, because a
@@ -647,6 +670,21 @@ form that exposes no run deck, never a union of the two. Verified live: discardi
 for the whole phase. A union put every discarded NEW card straight back, left the dedup signature
 identical, and froze the panel on cards already cut — and only ever the newly drafted ones, which are
 exactly the overlap.
+
+**Invariant 3: an EMPTY choice zone is not the condition for the run screen.** The client keeps the last
+pick's three choices in memory after the draft is over, so a finished draft is `(MIDRUN, 3 choices)` — and
+while the run screen was reported only from the no-choices path, it was unreachable in exactly the case it
+exists for: after a 30th pick the deck panel and the player's own rating never appeared, for as long as
+they sat there. A choice count is evidence about ANIMATION; only the session STATE says which screen the
+player is on. The routing is therefore one pure function, `RouteFor(state, choiceCount)`, which every poll
+goes through — the bug showed no panel AND no log line, so nothing but the routing can catch it, and its
+tests fail without the fix (verified both ways). Two traps a change here must keep:
+
+- `EndDraft` fires whenever `_wasDrafting` is set, which `HandleRunSummary` itself sets — so calling it
+  unconditionally on the run path re-raises `OnDraftEnded` twice a second. It runs only when there is no
+  run to report; showing the run panel already replaces the pick panel (one overlay, one screen).
+- `EndRunSummary` sits AFTER the state check, not before. Clearing the signature first tore the panel down
+  and rebuilt it on every tick of a screen whose choices linger.
 
 Post-loss redrafts are picks too (`IsRedraft`, with run deck + `RedraftDeck` as the synergy context).
 Redraft is an **Underground** mechanic; the code handles it mode-agnostically rather than gating on

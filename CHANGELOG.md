@@ -5,7 +5,32 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.8] - 2026-07-30
+
+### Changed
+
+- **The mulligan stops calling half your deck a bomb.** An expensive card escaped the "too slow" toss
+  by clearing an absolute score bar — but scores are anchored on the whole card pool, so on a strong
+  class most cards clear it. Measured on a live Demon Hunter run: the class's median card scored above
+  the bar, ~60% of the cards offered counted as bombs, and a card *below* its own class's median was
+  exempting itself. A bomb is now one of the best cards **you own**, counted per distinct card so a
+  duplicate cannot push it down the ranking, with an absolute floor that can only veto — the best three
+  cards of a bad deck are not bombs. When the win-rate feed has covered less than half your deck the
+  answer is "cannot tell" and nothing is tossed.
+- **The Coin is spent once.** It was credited to every card in hand at the same time, so one mana
+  crystal made a 3-drop "play on turn 2" and a 5-drop "play on turn 4" in the same hand — and since a
+  card counts as top end from 5 mana, going second no 5-drop was ever judged as top end at all. Its
+  tempo now goes to a single card, the cheapest early play, and never to an expensive one: coining out a
+  5-drop is what you do with a hand you should have thrown away. The Coin as a Combo enabler is
+  unchanged, being a condition rather than a tempo swing.
+
+### Fixed
+
+- **The run screen no longer skips the moment you finish a draft.** Straight after the 30th pick the deck
+  panel and your own rating did not appear at all — you had to play a match first, which cleared the stale
+  choices the client keeps in memory and let the panel through. The run screen was gated on an EMPTY choice
+  zone, and a finished draft has three choices still sitting in it. Poll routing is now one pure, tested
+  function of the session state, so a choice count can no longer decide which screen you are on.
 
 ## [0.1.7] - 2026-07-28
 

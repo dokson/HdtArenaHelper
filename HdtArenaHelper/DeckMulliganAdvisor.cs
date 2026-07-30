@@ -59,17 +59,94 @@ namespace HdtArenaHelper
 		private const int ThinEarlyGame = 6;
 
 		/// <summary>
-		/// The 0-100 score above which an expensive card stops being "too slow" and becomes the
-		/// reason you are in the game at all. Arena is decided by bombs as often as by curve, and
-		/// a card that wins the game on turn 6 is worth the two awkward turns before it — players
-		/// hold those, and the tempo rule alone would mulligan them away.
+		/// How many cards in your own deck may outscore a card before it stops being a bomb. THREE, so a
+		/// deck has about three of them: an expensive card stops being "too slow" and becomes the reason
+		/// you are in the game at all only if almost nothing you own is better. Arena is decided by bombs
+		/// as often as by curve, and a card that wins the game on turn 6 is worth the two awkward turns
+		/// before it — but a card that is merely good is not, and the tempo rule is right about it.
 		/// </summary>
-		private const double BombScore = 70.0;
+		private const int BombRank = 3;
 
-		private static bool IsBomb(Card card, Func<int, double?>? score)
+		/// <summary>
+		/// Is this the reason you are in the game at all? Measured against YOUR DECK, never against an
+		/// absolute score, and that is the whole point: card scores are normalized on the pool-wide
+		/// anchor, so a strong class sits well above 50 across the board and an absolute bar stops
+		/// meaning what it says. Measured on a live Demon Hunter run, the class's MEDIAN card scored
+		/// ~76 against an absolute bar of 70 — so ~60% of the cards offered read as bombs, and the
+		/// exemption fired on most of the deck instead of on its top. A card below its own class's
+		/// median was exempting itself from the top-end toss. Numbers in REPORT.md §16.
+		///
+		/// Deck-relative also needs no recalibration per rotation, which an absolute bar on a scale
+		/// whose spread is re-measured every refit silently does. It is the premise the rest of this
+		/// class already rests on: "below average" is measured against your deck, never the pool.
+		///
+		/// Returns NULL for "cannot tell", and that case is the whole reason this is not a bool. Ranking
+		/// against the deck needs a deck that has been MEASURED — at least half of its distinct cards —
+		/// because otherwise "nothing I own is better" is vacuously true and every expensive card would
+		/// exempt itself from the top-end toss exactly when the data is thinnest. A SHARE and not a count:
+		/// what matters is how much of the deck the feed covered, and 15 unscored cards mean something
+		/// different in a deck of 30 distinct cards than in one of 16. Callers must toss only on a definite
+		/// false — silence over a guess, since tossing a real bomb is the one error the player cannot
+		/// recover from, and it is the same direction every other abstention here fails in.
+		///
+		/// An UNSCORED card is not a bomb either — and the callers abstain on a missing score before
+		/// ever asking, so a thinly-sampled legendary is never tossed for lack of games.
+		/// </summary>
+		private static bool? IsBomb(IReadOnlyList<Card> deck, Card card, Func<int, double?>? score)
 		{
-			var value = score?.Invoke(card.DbfId);
-			return value.HasValue && value.Value >= BombScore;
+			var quality = score?.Invoke(card.DbfId);
+			if(!quality.HasValue)
+				return false;
+			// The rank DECIDES and the floor only VETOES, which is the asymmetry that makes both
+			// necessary: rank alone exempts the best three cards of a bad deck, and "the best of a bad
+			// lot" is not a reason to hold a five-drop — a weak deck's road to a win is curving out, so
+			// it is the deck that can least afford to. The floor cannot promote anything on its own.
+			if(quality.Value < BombFloor)
+				return false;
+			var (better, scored, distinct) = RankInDeck(deck, card, quality.Value, score);
+			if(scored * 2 < distinct)
+				return null;
+			return better < BombRank;
+		}
+
+		/// <summary>
+		/// The weakest absolute claim available, and deliberately only a veto. Fifty is not a tuning knob:
+		/// <c>ScoreMath</c> normalizes the pool's MEDIAN card to 50 by construction, so this says no more
+		/// than "better than an average card in the format" — and the previous, higher bar is what failed,
+		/// by asserting a level a strong class clears with almost every card it owns.
+		/// </summary>
+		private const double BombFloor = 50.0;
+
+		/// <summary>
+		/// Where this card ranks in the deck: how many cards score strictly better, and how many carried a
+		/// score at all. At ANY cost — the whole deck rather than one slot, because a bomb is not competing
+		/// for a turn, it is competing to be the best card you own. The scored count comes back with it
+		/// because a rank is only as meaningful as the number of cards it was measured against; unscored
+		/// deck cards are skipped for the same reason <see cref="CountBetterInSlot"/> skips them.
+		///
+		/// Counted per DISTINCT card, not per copy. An arena deck can hold two of anything, and counting
+		/// copies inflates the rank of everything below them — a bomb sitting behind two copies of one
+		/// better card would read as fourth-best. "Is this among the best cards I own" is a question about
+		/// cards, and a second copy of a card you already counted is not a new answer to it.
+		/// </summary>
+		private static (int Better, int Scored, int Distinct) RankInDeck(IReadOnlyList<Card> deck,
+			Card card, double quality, Func<int, double?>? score)
+		{
+			var seen = new HashSet<int>();
+			var better = 0;
+			var scored = 0;
+			foreach(var other in deck)
+			{
+				if(other.DbfId == card.DbfId || !seen.Add(other.DbfId))
+					continue;
+				var value = score?.Invoke(other.DbfId);
+				if(!value.HasValue)
+					continue;
+				scored++;
+				if(value.Value > quality)
+					better++;
+			}
+			return (better, scored, seen.Count);
 		}
 
 		/// <summary>
@@ -355,13 +432,17 @@ namespace HdtArenaHelper
 			if(deck.Count < 20)
 				return empty;
 
+			// Which card the Coin actually pays for, decided ONCE for the hand — see CoinTarget.
+			var coinTarget = onCoin ? CoinTarget(hand!) : -1;
+
 			// Judged left to right, and the verdicts so far are an INPUT to the next card: the
 			// "second of its slot" rule has to know which earlier cards actually turned out to be
 			// early plays, not merely which ones share a cost.
 			var verdicts = new List<MulliganCardVerdict>(hand.Count);
 			for(var i = 0; i < hand.Count; i++)
 			{
-				var verdict = Judge(hand[i]!, i, hand!, deck, onCoin, _score, verdicts, opponentHeroPower);
+				var verdict = Judge(hand[i]!, i, hand!, deck, onCoin, coinTarget, _score, verdicts,
+					opponentHeroPower);
 				verdicts.Add(DemoteDeadOutcast(hand[i]!, i, hand.Count, verdict));
 			}
 			return verdicts;
@@ -413,10 +494,15 @@ namespace HdtArenaHelper
 		/// deck does not actually make true.
 		/// </summary>
 		private static MulliganCardVerdict Judge(Card card, int index, IReadOnlyList<Card> hand,
-			IReadOnlyList<Card> deck, bool onCoin, Func<int, double?>? score,
+			IReadOnlyList<Card> deck, bool onCoin, int coinTarget, Func<int, double?>? score,
 			IReadOnlyList<MulliganCardVerdict> earlier, Card? opponentHeroPower)
 		{
 			var isBody = card.Type == CardType.MINION;
+
+			// The turn a card in THIS hand lands on. The Coin's shift reaches one card only — the one it
+			// is actually spent on — so this takes the hand position and not just the card.
+			int TurnOf(Card other, int position)
+				=> EffectiveTurn(other, onCoin && position == coinTarget);
 
 			// The Coin is a card, not a modifier: it moves every cost one turn earlier (a 3-drop
 			// lands on turn 2), and it is itself a spell that other cards can care about. Modelling
@@ -425,7 +511,7 @@ namespace HdtArenaHelper
 			// the coin, which is exactly the mistake a universal mulligan chart makes.
 			// Known simplification: the synergy side (a deck that wants a spell cast, a card that
 			// wants a full board of mana) is not modelled here, only the tempo side.
-			var turn = EffectiveTurn(card, onCoin);
+			var turn = TurnOf(card, index);
 
 			// HERO cards get no verdict, for the same reason the offline model refuses to score
 			// them: their printed cost is not what they cost, and the tempo rules are built on the
@@ -626,9 +712,10 @@ namespace HdtArenaHelper
 			//     A card with a trade upside COUNTS as an early play, for the same reason rule 5a
 			//     exists: one mana turns it into a better card and draws a replacement, so a hand
 			//     holding one is not doing nothing on turn 1.
-			if(turn >= NoEarlyPlayTurn && !IsSelfDiscounting(card) && !IsBomb(card, score)
+			if(turn >= NoEarlyPlayTurn && !IsSelfDiscounting(card) && IsBomb(deck, card, score) == false
 				&& hand.Count >= OpeningHandSize
-				&& hand.All(c => EffectiveTurn(c, onCoin) >= NoEarlyPlayTurn && !HasTradeUpside(c)))
+				&& hand.Select((c, i) => (Card: c, Turn: TurnOf(c, i)))
+					.All(x => x.Turn >= NoEarlyPlayTurn && !HasTradeUpside(x.Card)))
 				return new MulliganCardVerdict(MulliganVerdict.Toss,
 					$"nothing before turn {NoEarlyPlayTurn}");
 
@@ -665,7 +752,8 @@ namespace HdtArenaHelper
 			//     that was going to be wasted, so once the hand holds a real turn-1 play the two compete
 			//     for it and the expensive card goes back.
 			if(turn >= TopEndCost && HasTradeUpside(card)
-				&& !hand.Where((c, i) => i != index).Any(c => EffectiveTurn(c, onCoin) <= 1))
+				&& !hand.Select((c, i) => (Card: c, Index: i))
+					.Any(x => x.Index != index && TurnOf(x.Card, x.Index) <= 1))
 				return new MulliganCardVerdict(MulliganVerdict.Situational,
 					"upgrades when traded, and turn 1 is free");
 
@@ -689,10 +777,13 @@ namespace HdtArenaHelper
 
 			if(turn >= TopEndCost && !IsSelfDiscounting(card))
 			{
+				// The abstention comes FIRST and stays: no score means silence, because a thinly-sampled
+				// legendary scores mid-table for lack of games rather than lack of power, and tossing it
+				// is the one error the player cannot recover from.
 				var quality = score?.Invoke(card.DbfId);
 				if(!quality.HasValue)
 					return new MulliganCardVerdict(MulliganVerdict.Situational);
-				if(quality.Value < BombScore)
+				if(IsBomb(deck, card, score) == false)
 					return new MulliganCardVerdict(MulliganVerdict.Toss,
 						$"too slow (turn {turn})");
 			}
@@ -701,8 +792,8 @@ namespace HdtArenaHelper
 			//    hand is the one you give back, since only one of them lands on curve. The bomb
 			//    exemption has to repeat here — the rule above deliberately spares a game-winning
 			//    card from the top-end toss, and this one would otherwise take it straight back.
-			if(turn >= LateMidTurn && hand.Take(index).Any(c => EffectiveTurn(c, onCoin) < turn)
-				&& !IsSelfDiscounting(card) && !IsBomb(card, score))
+			if(turn >= LateMidTurn && hand.Take(index).Select((c, i) => TurnOf(c, i)).Any(t => t < turn)
+				&& !IsSelfDiscounting(card) && IsBomb(deck, card, score) == false)
 				return new MulliganCardVerdict(MulliganVerdict.Toss,
 					"behind a cheaper play");
 
@@ -791,6 +882,39 @@ namespace HdtArenaHelper
 		/// <summary>The turn this card first plays, which is one earlier with the Coin.</summary>
 		private static int EffectiveTurn(Card card, bool onCoin)
 			=> onCoin ? System.Math.Max(1, card.Cost - 1) : card.Cost;
+
+		/// <summary>
+		/// Which card in hand the Coin's tempo belongs to, or -1 for none. There is ONE Coin and it buys
+		/// ONE swing, so crediting it to every card at once double-counts a single resource — and it did:
+		/// the same hand had a 3-drop "playing on turn 2" AND a 5-drop "playing on turn 4", off one mana
+		/// crystal, which is enough to flip two verdicts.
+		///
+		/// It goes to the CHEAPEST early play, because that is the line that turns mana which was going to
+		/// be wasted into board — Coin plus a two-drop on turn one, in a format where taking the board
+		/// early is what the games are decided by. Ties go leftmost, arbitrarily but stably.
+		///
+		/// A TOP-END card is never the target, and that exclusion is the point rather than a detail:
+		/// coining out a 5-drop is the fallback for a hand with nothing else to do, which is exactly the
+		/// hand that should have been mulliganed. Letting the Coin reach it made the Coin an argument for
+		/// keeping the card the Coin was only needed BECAUSE of. So a hand whose cheapest play is
+		/// expensive gets no shift at all, and every card in it is judged at its printed cost.
+		///
+		/// Only TEMPO is rationed here. The Coin as a Combo ENABLER is a condition rather than a swing —
+		/// it is a card played before another one whatever else the turn does — so that rule still reads
+		/// <c>onCoin</c> directly, and does not compete for this budget.
+		/// </summary>
+		private static int CoinTarget(IReadOnlyList<Card> hand)
+		{
+			var best = -1;
+			for(var i = 0; i < hand.Count; i++)
+			{
+				if(hand[i].Cost >= TopEndCost || !IsPermanentPlay(hand[i]))
+					continue;
+				if(best < 0 || hand[i].Cost < hand[best].Cost)
+					best = i;
+			}
+			return best;
+		}
 
 		private static Card? Resolve(int dbfId) => Cards.GetFromDbfId(dbfId);
 

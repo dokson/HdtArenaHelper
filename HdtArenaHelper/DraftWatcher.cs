@@ -138,7 +138,8 @@ namespace HdtArenaHelper
 		private bool _unresolvedLogged;
 		private string? _lastReviewSig; // dedup the deck-edit review; re-fire when the deck changes
 		private string? _lastRunSig;    // same, for the run screen: re-fire only when the deck changes
-		private object? _lastQuietState; // the session state last reported as "nothing of ours", logged once
+		private ArenaSessionState? _lastQuietState; // the state last reported as "nothing of ours", logged once
+		private bool _quietStateLogged; // ...including the unreadable case, which no state value can stand for
 		private int _lastPartialChoiceCount = -1; // a non-pick choice count, logged once per distinct value
 
 		/// <summary>The arena screens are gone for real (the client left the DRAFT scene), so anything still
@@ -195,6 +196,8 @@ namespace HdtArenaHelper
 			_unresolvedLogged = false;
 			_lastReviewSig = null;
 			_lastRunSig = null;
+			_quietStateLogged = false;
+			_lastQuietState = null;
 		}
 
 
@@ -214,76 +217,53 @@ namespace HdtArenaHelper
 				Log($"GetArenaDeck failed: {ex.Message}");
 			}
 
-			// "Edit Your Deck" / discard phase: rank the whole deck so the weakest cards to cut
-			// are obvious. This is a real screen even though no card is being picked.
-			if(arenaInfo != null && arenaInfo.SessionState == ArenaSessionState.EDITING_DECK)
+			var choiceCount = choices?.Choices?.Count ?? 0;
+			switch(RouteFor(arenaInfo?.SessionState, choiceCount))
 			{
-				EndRunSummary(); // the redraft screen is not the run screen
-				HandleDeckEdit(arenaInfo);
-				return;
-			}
-
-			if(choices == null || choices.Choices == null || choices.Choices.Count == 0)
-			{
-				// No pick on screen. Before hiding, one screen is worth reporting: the RUN screen you
-				// sit on between matches, with the finished deck and Play in front of you. Gated
-				// POSITIVELY on `MIDRUN` and a complete deck rather than on "nothing else is showing",
-				// because this is the screen that produced a ghost overlay twice — an unfinished
-				// redraft reports EDITING_DECK from the main menu, and choices linger here in memory.
-				// "Nothing else is showing" is true of the main menu and Battlegrounds too.
-				if(arenaInfo != null && HandleRunSummary(arenaInfo))
+				case PollRoute.DeckEdit:
+					// "Edit Your Deck" / discard phase: rank the whole deck so the weakest cards to cut
+					// are obvious. This is a real screen even though no card is being picked.
+					EndRunSummary(); // the redraft screen is not the run screen
+					HandleDeckEdit(arenaInfo!);
 					return;
-				// Nothing of ours is on screen — including no run to report. This is the path a mode switch
-				// takes when the other mode has no run in progress, and without EndRunSummary the previous
-				// mode's panel stayed up.
-				//
-				// The session state is LOGGED here, once per distinct value: this branch is where every
-				// "why is nothing showing?" ends up, and it used to return in silence, so the log could not
-				// tell an unrecognised state from a screen we had decided to ignore. Seen live after a
-				// redraft, where the panels vanished and nothing said which state the client had moved to.
-				var state = arenaInfo?.SessionState;
-				if(!Equals(state, _lastQuietState))
-				{
-					_lastQuietState = state;
-					Log($"no arena screen of ours: session state {(state == null ? "unreadable" : state.ToString())}");
-				}
-				EndRunSummary();
-				EndDraft();
-				return;
-			}
 
-			EndRunSummary(); // a pick is on screen, so the run panel is not what the player is looking at
+				case PollRoute.PartialChoices:
+					// Mid-animation the memory can expose a partial choice list; only 3 is a real pick
+					// (HDT's ArenaStateWatcher applies the same 0-or-3 rule).
+					//
+					// LOGGED, once per distinct count, because this return is otherwise invisible and it
+					// swallows the whole poll: a list that is neither empty nor 3 skips the run screen and
+					// the session-state diagnostic alike. Live symptom: two minutes of complete silence on
+					// the arena deck screen with the scene reading DRAFT — a dead watcher, from outside.
+					if(_lastPartialChoiceCount != choiceCount)
+					{
+						_lastPartialChoiceCount = choiceCount;
+						Log($"choice list of {choiceCount} is not a pick (only 0 or 3 are); "
+							+ "no screen handled this poll");
+					}
+					return;
 
-			// Mid-animation the memory can expose a partial choice list; only 3 is a real
-			// pick (HDT's ArenaStateWatcher applies the same 0-or-3 rule).
-			//
-			// LOGGED, once per distinct count, because this return is otherwise invisible and it swallows
-			// the whole poll: a list that is neither empty nor 3 skips the run screen and the session-state
-			// diagnostic alike. Live symptom: two minutes of complete silence on the arena deck screen with
-			// the scene reading DRAFT, which is indistinguishable from a dead watcher.
-			if(choices.Choices.Count != 3)
-			{
-				if(_lastPartialChoiceCount != choices.Choices.Count)
-				{
-					_lastPartialChoiceCount = choices.Choices.Count;
-					Log($"choice list of {choices.Choices.Count} is not a pick (only 0 or 3 are); "
-						+ "no screen handled this poll");
-				}
-				return;
+				case PollRoute.RunOrNothing:
+					HandleRunOrNothing(arenaInfo);
+					return;
+
+				case PollRoute.Retry:
+					return; // transient (HS starting/closing): the deck is unreadable, so retry next tick
+
+				default: // PollRoute.Pick — three choices, and a state in which they are a real one
+					HandlePick(choices!, arenaInfo!);
+					return;
 			}
+		}
+
+		/// <summary>A real pick is on screen: resolve the offered cards and raise them.</summary>
+		private void HandlePick(DraftChoices choices, ArenaInfo arenaInfo)
+		{
 			_lastPartialChoiceCount = -1;
 
-			if(arenaInfo == null)
-				return; // transient (HS starting/closing); retry next tick
-
-			// Choices can linger in memory outside the draft (landing screen, mid-run):
-			// only DRAFTING and the redraft states are real picks — anything else must
-			// hide the overlay, or we'd paint plaques over a non-draft screen.
-			if(!IsActiveDraftState(arenaInfo.SessionState))
-			{
-				EndDraft();
-				return;
-			}
+			// The run panel is not what the player is looking at. It stays ahead of the Version dedup, so
+			// a repeated poll of the same pick still clears the panel.
+			EndRunSummary();
 
 			if(choices.Version == _lastVersion)
 				return;
@@ -451,6 +431,83 @@ namespace HdtArenaHelper
 				Math.Max(MinSuggested, toDiscard + SuggestMargin));
 		}
 
+		/// <summary>Which of our screens a poll is about. See <see cref="RouteFor"/>.</summary>
+		internal enum PollRoute
+		{
+			/// <summary>The redraft "Edit Your Deck" phase.</summary>
+			DeckEdit,
+
+			/// <summary>The run screen if there is a run to report, otherwise nothing of ours.</summary>
+			RunOrNothing,
+
+			/// <summary>A choice list that is neither empty nor 3: an animation artifact, not a pick.</summary>
+			PartialChoices,
+
+			/// <summary>The client could not be read this tick; try again.</summary>
+			Retry,
+
+			/// <summary>Three offered cards, in a state where they are a real pick.</summary>
+			Pick
+		}
+
+		/// <summary>
+		/// Which screen a poll is about, from the only two things that decide it. Pure and extracted
+		/// because getting it wrong is invisible from the outside — the bug it exists to pin produced no
+		/// panel and no log line at all, for as long as the player sat on the screen.
+		///
+		/// The load-bearing case is <c>(MIDRUN, 3)</c>: a FINISHED draft. The client keeps the last pick's
+		/// three choices in memory while the session state moves on, so "the run screen" and "no choices on
+		/// screen" are NOT the same condition — and while they were treated as one, the run screen (with the
+		/// deck panel and the player's own rating hanging off it) was unreachable in the one case it exists
+		/// for. A choice count is evidence about ANIMATION, never about which screen the player is on: only
+		/// the session state says that, which is why every non-pick state routes the same way whatever is
+		/// left in the choice zone.
+		///
+		/// A null state means the deck was unreadable. With no choices that is still <c>RunOrNothing</c> —
+		/// the caller has a panel to tear down and a diagnostic to log, and neither needs the deck — but
+		/// with a pick's worth of choices it is <c>Retry</c>, because nothing can be scored without the
+		/// class and the drafted cards the deck carries.
+		/// </summary>
+		internal static PollRoute RouteFor(ArenaSessionState? state, int choiceCount)
+		{
+			if(state == ArenaSessionState.EDITING_DECK)
+				return PollRoute.DeckEdit;
+			if(choiceCount == 0)
+				return PollRoute.RunOrNothing;
+			if(choiceCount != 3)
+				return PollRoute.PartialChoices;
+			if(state == null)
+				return PollRoute.Retry;
+			return IsActiveDraftState(state.Value) ? PollRoute.Pick : PollRoute.RunOrNothing;
+		}
+
+		/// <summary>
+		/// The run screen if there is a run to report, otherwise nothing of ours. One handler for both
+		/// routes that reach it — a draft that has just ended and a screen with no choices at all — because
+		/// they differ only in what the client happens to have left in the choice zone.
+		///
+		/// <see cref="EndDraft"/> runs only when there is no run to report, and that ordering matters: it
+		/// fires whenever <c>_wasDrafting</c> is set, which <see cref="HandleRunSummary"/> itself sets, so
+		/// calling it unconditionally re-raised <c>OnDraftEnded</c> on every poll of the run screen — twice
+		/// a second, log line included. Showing the run panel already replaces the pick panel (one overlay,
+		/// one screen), so nothing needs tearing down first.
+		/// </summary>
+		private void HandleRunOrNothing(ArenaInfo? arenaInfo)
+		{
+			// Gated POSITIVELY on a run state and a complete deck rather than on "nothing else is showing",
+			// because this is the screen that produced a ghost overlay twice — an unfinished redraft reports
+			// EDITING_DECK from the main menu, and "nothing else is showing" is true of Battlegrounds too.
+			if(arenaInfo != null && HandleRunSummary(arenaInfo))
+				return;
+
+			// Nothing of ours is on screen — including no run to report. This is the path a mode switch
+			// takes when the other mode has no run in progress, and without EndRunSummary the previous
+			// mode's panel stayed up.
+			LogQuietState(arenaInfo?.SessionState);
+			EndRunSummary();
+			EndDraft();
+		}
+
 		/// <summary>
 		/// The run screen between matches: a finished deck, and no pick to make. Returns true when it
 		/// took responsibility for the screen, so the caller does NOT hide the overlay.
@@ -568,6 +625,23 @@ namespace HdtArenaHelper
 			=> state is ArenaSessionState.MIDRUN
 				or ArenaSessionState.REDRAFTING
 				or ArenaSessionState.MIDRUN_REDRAFT_PENDING;
+
+		/// <summary>
+		/// Names the session state that led to no screen of ours, once per distinct value. Every "why is
+		/// nothing showing?" ends up on one of the two paths that call this, and both used to return in
+		/// silence — so the log could not tell an unrecognised state from a screen we had decided to ignore,
+		/// and could not tell either of them from a dead watcher. Both symptoms were seen live.
+		/// </summary>
+		private void LogQuietState(ArenaSessionState? state)
+		{
+			// `_quietStateLogged` and not just the value: null means UNREADABLE here, and it is also the
+			// field's initial value, so a state that could not be read at all would never be logged.
+			if(_quietStateLogged && state == _lastQuietState)
+				return;
+			_quietStateLogged = true;
+			_lastQuietState = state;
+			Log($"no arena screen of ours: session state {(state == null ? "unreadable" : state.ToString())}");
+		}
 
 		private void EndRunSummary()
 		{

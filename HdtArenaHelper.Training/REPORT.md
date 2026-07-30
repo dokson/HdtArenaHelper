@@ -652,6 +652,41 @@ maintainer decision rather than a bug fix. **No wrong verdict has been demonstra
 disagreement** — the one live case that looked like one was traced against the pre-redraft deck (4
 early minions, comfortably thin), where the widened window was justified.
 
+### 16b. The absolute "bomb" bar was clearing on most of the pool, not on its top
+
+2026-07-29, from a live Underground Arena Demon Hunter run (HDT log + the cached HSReplay payload for
+the same session). Measured because a real opening hand returned three abstentions where two
+independent arena players, asked blind, both returned three tosses.
+
+The card scores are normalized on the **whole-pool** anchor: `ALL` median drawn win-rate **48.8%**,
+robust sigma **6.82** (MAD 4.60). The drafted class's own median sits well above it — DEMONHUNTER
+median **54.1%**, i.e. **z = +0.78**, which the ~+35 pt/sigma logistic puts at a displayed score of
+**~76**. So:
+
+| Quantity | Value |
+|---|---|
+| Old absolute bomb bar (`BombScore`) | 70 |
+| Score of the MEDIAN Demon Hunter card | ~76 |
+| Final scores ≥ 70 among the 73 cards offered across this draft | **~44 (~60%)** |
+
+The exemption was therefore firing on the majority of the deck rather than on its top three, and the
+card that prompted the measurement — Illidari Inquisitor, final score **75**, *below* its own class's
+median — was exempting itself from the top-end toss. Micro Machine is the same effect seen from the
+draft side: `drawn_win_rate` 53.9% on 304 Demon Hunter games against a class median of 54.1%, i.e.
+exactly average for the class, displayed as **76** because the anchor is the pool and not the class.
+
+Consequence, per **AGENTS.md**: rank within the drafted deck decides, an absolute floor at the scale's
+own centre (50 = the pool's median card by construction) may only veto. The floor is what stops "best
+of a bad lot" from reading as a bomb; the rank is what stops a strong class from calling most of its
+pool one. Neither number needs recalibrating per rotation, which the old bar silently did — the raw
+spread is re-measured at every refit.
+
+**The Coin was credited to every card in hand at once**, off one mana crystal. In the same hand a
+3-drop read as "plays on turn 2" and a 5-drop as "plays on turn 4"; since `TopEndCost` is 5, going
+second **no 5-cost card was ever top end**, so two of the three cards in question fell through every
+rule to the default abstention. Both players asked flagged this independently and unprompted ("there
+is one Coin and it buys one swing"), and both said the Coin in this hand goes to the 3-drop.
+
 ### 17. Blizzard's arena leaderboard endpoint, measured
 
 All figures below are from live requests to

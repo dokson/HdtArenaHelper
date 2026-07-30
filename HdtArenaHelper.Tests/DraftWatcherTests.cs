@@ -62,6 +62,88 @@ namespace HdtArenaHelper.Tests
 			Assert.Equal(active, DraftWatcher.IsActiveDraftState(state));
 		}
 
+		// ---- poll routing: which screen a poll is about ------------------------------
+		//
+		// The bug this pins showed nothing and logged nothing, so nothing but the routing can catch it.
+
+		/// <summary>
+		/// A FINISHED draft: the client keeps the last pick's three choices in memory while the session
+		/// state moves on to MIDRUN. This is the case that was broken — the run screen was reported only
+		/// when the choice zone was EMPTY, so after a 30th pick the deck panel and the player's own rating
+		/// never appeared, for as long as they sat there.
+		/// </summary>
+		[Fact]
+		public void A_finished_draft_reports_the_run_screen_even_with_the_last_pick_still_in_memory()
+		{
+			Assert.Equal(DraftWatcher.PollRoute.RunOrNothing,
+				DraftWatcher.RouteFor(HearthMirror.Enums.ArenaSessionState.MIDRUN, 3));
+		}
+
+		/// <summary>
+		/// The same, one state wider: a choice count says something about ANIMATION, never about which
+		/// screen the player is on. Only the session state does, so stale choices may not change the route.
+		/// </summary>
+		[Theory]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.MIDRUN)]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.INVALID)]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.NO_RUN)]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.REWARDS)]
+		public void A_non_pick_state_routes_the_same_way_whatever_is_left_in_the_choice_zone(
+			HearthMirror.Enums.ArenaSessionState state)
+		{
+			Assert.Equal(DraftWatcher.RouteFor(state, 0), DraftWatcher.RouteFor(state, 3));
+		}
+
+		[Theory]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.DRAFTING)]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.REDRAFTING)]
+		[InlineData(HearthMirror.Enums.ArenaSessionState.MIDRUN_REDRAFT_PENDING)]
+		public void Three_choices_in_a_draft_state_are_a_pick(HearthMirror.Enums.ArenaSessionState state)
+		{
+			Assert.Equal(DraftWatcher.PollRoute.Pick, DraftWatcher.RouteFor(state, 3));
+		}
+
+		/// <summary>A draft state with nothing offered is not a pick — it is the gap between two of them.</summary>
+		[Fact]
+		public void A_draft_state_with_no_choices_is_not_a_pick()
+		{
+			Assert.Equal(DraftWatcher.PollRoute.RunOrNothing,
+				DraftWatcher.RouteFor(HearthMirror.Enums.ArenaSessionState.DRAFTING, 0));
+		}
+
+		/// <summary>Only 0 or 3 is a real choice list; anything between is an animation mid-flight.</summary>
+		[Theory]
+		[InlineData(1)]
+		[InlineData(2)]
+		[InlineData(4)]
+		public void A_partial_choice_list_is_not_a_pick(int choiceCount)
+		{
+			Assert.Equal(DraftWatcher.PollRoute.PartialChoices,
+				DraftWatcher.RouteFor(HearthMirror.Enums.ArenaSessionState.DRAFTING, choiceCount));
+		}
+
+		/// <summary>The deck-edit phase owns the poll whatever the choice zone holds.</summary>
+		[Theory]
+		[InlineData(0)]
+		[InlineData(3)]
+		public void The_deck_edit_phase_wins_over_any_choices(int choiceCount)
+		{
+			Assert.Equal(DraftWatcher.PollRoute.DeckEdit,
+				DraftWatcher.RouteFor(HearthMirror.Enums.ArenaSessionState.EDITING_DECK, choiceCount));
+		}
+
+		/// <summary>
+		/// An unreadable deck: a pick cannot be scored without the class and the drafted cards it carries,
+		/// so that retries — but with no choices there is still a panel to drop and a state to log, and
+		/// neither needs the deck.
+		/// </summary>
+		[Fact]
+		public void An_unreadable_deck_retries_a_pick_but_still_tears_the_run_panel_down()
+		{
+			Assert.Equal(DraftWatcher.PollRoute.Retry, DraftWatcher.RouteFor(null, 3));
+			Assert.Equal(DraftWatcher.PollRoute.RunOrNothing, DraftWatcher.RouteFor(null, 0));
+		}
+
 		// ---- deck-review plan (the redraft "Edit Your Deck" phase) --------------------
 
 		private static System.Collections.Generic.IReadOnlyList<(string Id, int Count)> Pairs(

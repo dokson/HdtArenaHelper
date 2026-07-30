@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using HdtArenaHelper.CardDatabase;
@@ -28,6 +29,16 @@ namespace HdtArenaHelper.Tests
 		// The advisor reads the opponent's hero power as a HearthDb card (it classifies the printed
 		// text), so the named pool supplies the identity and HearthDb the card.
 		private static Card HeroPower(CardEntry card) => Cards.All[card.CardId];
+
+		/// <summary>
+		/// A score source under which the deck OUTRANKS whatever is in hand, so nothing in hand can pass
+		/// the bomb test. A flat score cannot express "mediocre" any more, and in fact means the opposite:
+		/// the bomb bar is measured against your own deck, so a card that no deck card beats IS the best
+		/// card you own. Every card is scored — a real deck has 30 of them — and only the ORDER carries
+		/// the claim, which is the point of a deck-relative bar.
+		/// </summary>
+		private static Func<int, double?> DeckOutranksHand(CardEntry deckFiller)
+			=> id => id == deckFiller.DbfId ? 80.0 : 40.0;
 
 		/// <summary>A deck of `count` copies of one card, padded to a believable arena deck size.</summary>
 		private static List<int> DeckOf(params (CardEntry Card, int Count)[] cards)
@@ -191,7 +202,7 @@ namespace HdtArenaHelper.Tests
 			// the comparison would prove nothing.
 			var deck = DeckOf((CheapBody, 30));
 			var advisor = new DeckMulliganAdvisor();
-			advisor.SetScoreSource(_ => 40.0);
+			advisor.SetScoreSource(DeckOutranksHand(CheapBody));
 			var tradeable = advisor.Evaluate(new[] { Dbf(UpgradingTopEnd) }, deck,
 				CardClass.PALADIN, onCoin: false);
 			var plain = advisor.Evaluate(new[] { Dbf(BigBody) }, deck, CardClass.PALADIN, onCoin: false);
@@ -219,7 +230,7 @@ namespace HdtArenaHelper.Tests
 			// Pinned against a genuinely self-discounting card so the test measures the distinction
 			// rather than the exemption having been deleted.
 			var advisor = new DeckMulliganAdvisor();
-			advisor.SetScoreSource(_ => 40.0);
+			advisor.SetScoreSource(DeckOutranksHand(CheapBody));
 			var deck = DeckOf((CheapBody, 30));
 
 			// Alter Time behind a cheaper play: the discount is not its own, so it goes back.
@@ -291,7 +302,7 @@ namespace HdtArenaHelper.Tests
 			// rest of the hand changes.
 			var deck = DeckOf((CheapBody, 30));
 			var advisor = new DeckMulliganAdvisor();
-			advisor.SetScoreSource(_ => 40.0);
+			advisor.SetScoreSource(DeckOutranksHand(CheapBody));
 
 			var alone = advisor.Evaluate(new[] { Dbf(UpgradingTopEnd) }, deck,
 				CardClass.PALADIN, onCoin: false);
@@ -389,7 +400,7 @@ namespace HdtArenaHelper.Tests
 			// the only place this can fire. A score is set so the control is the top-end rule firing
 			// rather than abstaining for want of data.
 			var advisor = new DeckMulliganAdvisor();
-			advisor.SetScoreSource(_ => 40.0);
+			advisor.SetScoreSource(DeckOutranksHand(CheapBody));
 			var deck = DeckOf((CheapBody, 30));
 
 			var infused = advisor.Evaluate(new[] { Dbf(HSCard.StonebornAccuser) }, deck,
@@ -556,11 +567,15 @@ namespace HdtArenaHelper.Tests
 			// The hand holds a cheap play on purpose, so the card under test is judged by the top-end
 			// rule and not by the dead-hand rule below it — a hand of nothing but expensive cards goes
 			// back whole for a reason that needs no score, which is a different rule and its own test.
+			// "Bomb" is measured against THIS DECK, so the two runs below differ only in whether the
+			// deck outranks the expensive card — same hand, same deck, same card, opposite verdict.
+			// An absolute bar cannot express that, and on a live Demon Hunter run it did not: the
+			// class's median card cleared it, so most of the deck read as a bomb.
 			var hand = new[] { Dbf(CheapBody), Dbf(BigBody) };
 			var deck = DeckOf((TwoDropBody, 30));
 
 			var mediocre = new DeckMulliganAdvisor();
-			mediocre.SetScoreSource(_ => 40.0);
+			mediocre.SetScoreSource(DeckOutranksHand(TwoDropBody));
 			var plain = mediocre.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false);
 			Assert.Equal(MulliganVerdict.Toss, plain[1].Verdict);
 
@@ -569,10 +584,85 @@ namespace HdtArenaHelper.Tests
 			var blind = Advisor.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false);
 			Assert.Equal(MulliganVerdict.Situational, blind[1].Verdict);
 
+			// The best card you own: nothing in the deck outranks it, so the top-end toss spares it.
 			var bomb = new DeckMulliganAdvisor();
-			bomb.SetScoreSource(_ => 95.0);
+			bomb.SetScoreSource(id => id == Dbf(BigBody) ? 95.0 : 50.0);
 			var kept = bomb.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false);
 			Assert.NotEqual(MulliganVerdict.Toss, kept[1].Verdict);
+
+			// And the case an absolute bar gets wrong: the SAME high score, on a deck that is better
+			// still. A card rated 95 is not the reason you are in the game if you own four better ones.
+			// The deck needs several DISTINCT cards to say that at all — rank is counted per card and not
+			// per copy, so thirty copies of one card can never put three things above anything.
+			var stacked = DeckOf((TwoDropBody, 8), (CheapBody, 8), (ThreeDropBody, 7), (Removal, 7));
+			var outclassed = new DeckMulliganAdvisor();
+			outclassed.SetScoreSource(id => id == Dbf(BigBody) ? 95.0 : 96.0);
+			var tossed = outclassed.Evaluate(hand, stacked, CardClass.PALADIN, onCoin: false);
+			Assert.Equal(MulliganVerdict.Toss, tossed[1].Verdict);
+		}
+
+		[Fact]
+		public void The_Coin_pays_for_ONE_card_and_cannot_also_rescue_the_top_end()
+		{
+			// There is one Coin and it buys one swing. Crediting it to every card at once double-counted a
+			// single resource: the same hand had a three-drop "playing on turn 2" AND a five-drop "playing
+			// on turn 4", which took the five-drop out of the top-end rule entirely and left it with no
+			// verdict at all. Found live, going second.
+			//
+			// The Coin goes to the cheap body — the line that turns wasted mana into board — so the
+			// five-drop is judged at its printed cost and goes back.
+			var deck = DeckOf((TwoDropBody, 8), (CheapBody, 8), (ThreeDropBody, 7), (Removal, 7));
+			var advisor = new DeckMulliganAdvisor();
+			advisor.SetScoreSource(id => id == Dbf(CostlyWeapon) ? 60.0 : 96.0);
+
+			var hand = new[] { Dbf(CostlyWeapon), Dbf(ThreeDropBody) };
+			var onCoin = advisor.Evaluate(hand, deck, CardClass.PALADIN, onCoin: true);
+
+			Assert.Equal(MulliganVerdict.Toss, onCoin[0].Verdict);
+			Assert.Contains("too slow", onCoin[0].Reason ?? "");
+		}
+
+		[Fact]
+		public void A_bomb_is_the_best_card_you_OWN_and_a_weak_decks_best_is_still_not_one()
+		{
+			// Rank decides and the floor only vetoes, and both are needed. Rank alone exempts the best
+			// three cards of a bad deck from the top-end toss — but "the best of a bad lot" is not a
+			// reason to hold a five-drop, since a weak deck's road to a win is curving out and it is the
+			// deck that can least afford to spend turns doing nothing.
+			//
+			// Same hand, same deck, same RANK — top of its deck in both runs. Only the absolute quality
+			// differs, so the floor is the only thing that can produce the difference.
+			var deck = DeckOf((TwoDropBody, 8), (CheapBody, 8), (ThreeDropBody, 7), (Removal, 7));
+			var hand = new[] { Dbf(CheapBody), Dbf(BigBody) };
+
+			var strong = new DeckMulliganAdvisor();
+			strong.SetScoreSource(id => id == Dbf(BigBody) ? 90.0 : 55.0);
+			Assert.NotEqual(MulliganVerdict.Toss,
+				strong.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false)[1].Verdict);
+
+			var weak = new DeckMulliganAdvisor();
+			weak.SetScoreSource(id => id == Dbf(BigBody) ? 45.0 : 20.0);
+			Assert.Equal(MulliganVerdict.Toss,
+				weak.Evaluate(hand, deck, CardClass.PALADIN, onCoin: false)[1].Verdict);
+		}
+
+		[Fact]
+		public void A_second_COPY_of_a_better_card_does_not_push_a_bomb_down_the_ranking()
+		{
+			// Rank is counted per DISTINCT card. An arena deck can hold two of anything, and counting
+			// copies would let a single better card, drafted twice, take two of the three places above a
+			// bomb — so a card would stop being a bomb because of a duplicate rather than because of
+			// anything about the deck's quality.
+			var hand = new[] { Dbf(CheapBody), Dbf(BigBody) };
+			var advisor = new DeckMulliganAdvisor();
+			advisor.SetScoreSource(id =>
+				id == Dbf(TwoDropBody) || id == Dbf(ThreeDropBody) ? 96.0
+					: id == Dbf(BigBody) ? 90.0 : 50.0);
+
+			// Two better cards, one of them drafted twice: three COPIES above it, two CARDS.
+			var duplicates = DeckOf((TwoDropBody, 2), (ThreeDropBody, 1), (CheapBody, 27));
+			Assert.NotEqual(MulliganVerdict.Toss,
+				advisor.Evaluate(hand, duplicates, CardClass.PALADIN, onCoin: false)[1].Verdict);
 		}
 
 		[Fact]
@@ -738,7 +828,7 @@ namespace HdtArenaHelper.Tests
 			// and sitting on the dead right edge is not a reason to hold it. Pinned so that a version
 			// reaching for "Situational whenever Outcast is off" fails here.
 			var advisor = new DeckMulliganAdvisor();
-			advisor.SetScoreSource(_ => 40.0);
+			advisor.SetScoreSource(DeckOutranksHand(CheapBody));
 			var deck = DeckOf((CheapBody, 30));
 			var verdicts = advisor.Evaluate(
 				new[] { Dbf(CheapBody), Dbf(CheapBody), Dbf(HSCard.MidnightWolf) }, deck,
