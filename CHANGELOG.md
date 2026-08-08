@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-08-09
+
+Nothing in this release changes what the plugin shows or scores. What moved is the machinery around
+it: the reference HDT is current again, the committed card pool with it, and the weekly retrain
+stopped producing pull requests a reviewer could not adopt.
+
+### Changed
+
+- **Built against HDT 1.55.3** (was 1.53.14), and the committed card pool regenerated from its
+  HearthDb — 7,324 cards, HearthDb 36.2.0.0. Users auto-update HDT, so a pin left behind means the
+  released DLL is compiled against assemblies nobody is running.
+- **The HDT pin lives in one file**, `hdt-version.txt`. It used to be a literal in each of the four
+  workflows plus a default inside `resolve-hdt.ps1` — five copies of a number that must agree, and
+  they had stopped agreeing. A test fails if a workflow pins a version inline again.
+
+### Fixed
+
+- **`resolve-hdt.ps1` no longer hands back the wrong HDT.** Its cache was keyed on nothing: the
+  folder existed, so asking for a different version returned the old assemblies and the build went
+  green against the very version it was moving away from. It now stamps what it extracted and
+  re-downloads when that does not match.
+- **The canary is an alarm again.** It builds and tests against the latest official HDT, but the
+  committed card pool is generated *from* HearthDb — so at a lagging pin it failed on a stale pool,
+  which is data, and that failure buried the runtime-API drift the job exists to catch. It now
+  refreshes the pool first, and when it is green against a version we are not pinned to it opens a
+  single pull request moving the pin.
+
+- **The retrain PR now hands the reviewer golden values that compile.** The trainer printed them as
+  `[InlineData("LOOT_413", 27.90)]` while the tests had moved to named cards
+  (`{ HSCard.PlatedBeetle, 24.63 }`), so pasting the block broke the build — on the one pull request
+  the golden tests exist for. The accessor names come from the pool generator itself rather than a
+  second copy of the naming rule, and a test asserts every golden card has the accessor the trainer
+  prints.
+- **One retrain pull request, not one per week.** The branch was `retrain/<date>`, so each run opened
+  a new PR and left the previous one open with weights already superseded — the repo had two. A single
+  reused branch means there is always exactly one, showing the latest fit, retitled with its date.
+
 ## [0.1.8] - 2026-07-30
 
 ### Changed

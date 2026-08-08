@@ -130,8 +130,16 @@ namespace HdtArenaHelper.Training
 		internal static void PrintGoldenScores(IDictionary<string, double> weights, double intercept,
 			double anchor, double sigma)
 		{
+			// The accessor NAME, from the generator itself: the goldens are a TheoryData of named
+			// cards, so an [InlineData("LOOT_413", ...)] paste form does not compile — which is what
+			// every retrain PR was handing its reviewer. The names come from
+			// HSDatabaseGenerator.CardAccessorsById rather than a table here, so a reprint taking a
+			// set suffix cannot make this print an accessor that does not exist.
+			var accessors = HSDatabaseGenerator.CardAccessorsById();
+
 			Console.WriteLine();
-			Console.WriteLine("golden scores for HeuristicArenaDataSourceTests (paste on adopt):");
+			Console.WriteLine("golden scores for HeuristicArenaDataSourceTests.Goldens");
+			Console.WriteLine("(paste the VALUES over the literals on adopt; keep the trailing comments):");
 			foreach(var id in GoldenCards)
 			{
 				if(!Cards.All.TryGetValue(id, out var card))
@@ -139,10 +147,15 @@ namespace HdtArenaHelper.Training
 					Console.WriteLine($"  {id}: NOT FOUND in HearthDb — replace this golden card");
 					continue;
 				}
+				if(!accessors.TryGetValue(id, out var accessor))
+				{
+					Console.WriteLine($"  {id} ({card.Name}): no HSCard accessor — replace this golden card");
+					continue;
+				}
 				var raw = ScoreRaw(weights, intercept, card);
 				var norm = Math.Max(0, Math.Min(100, 50 + 15 * (raw - anchor) / sigma));
 				Console.WriteLine(FormattableString.Invariant(
-					$"  [InlineData(\"{id}\", {norm:0.00})] // {card.Name}"));
+					$"  {{ HSCard.{accessor}, {norm:0.00} }},"));
 			}
 		}
 
