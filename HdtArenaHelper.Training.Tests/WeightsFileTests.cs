@@ -68,5 +68,25 @@ namespace HdtArenaHelper.Training.Tests
 			var w = Round(("tx_summon", 1.0), ("attack", 1.0), ("Attack", 1.0), ("kw_forge", 1.0));
 			Assert.Equal(new[] { "Attack", "attack", "kw_forge", "tx_summon" }, w.Keys);
 		}
+
+		/// <summary>
+		/// The retrain PR's whole payload for a reviewer is a block of golden lines to paste, and for
+		/// two releases it was pasting <c>[InlineData("LOOT_413", ...)]</c> at a test that had moved to
+		/// named cards — a paste that does not compile, on the one PR the goldens exist for. So this
+		/// asserts the printed form is real: every golden card has an <c>HSCard</c> accessor with that
+		/// exact name. Reflection because that is the question — does the identifier EXIST — and this
+		/// project compiles the generated pool into the test assembly, so the answer is checkable.
+		/// </summary>
+		[Fact]
+		public void Every_golden_card_has_the_HSCard_accessor_the_trainer_prints()
+		{
+			var accessors = HSDatabaseGenerator.CardAccessorsById();
+
+			foreach(var id in WeightsFile.GoldenCards)
+			{
+				Assert.True(accessors.TryGetValue(id, out var name), $"{id} has no HSCard accessor.");
+				Assert.NotNull(typeof(HdtArenaHelper.CardDatabase.HSCard).GetProperty(name));
+			}
+		}
 	}
 }

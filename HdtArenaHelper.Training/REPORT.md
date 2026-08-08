@@ -884,6 +884,49 @@ decimal (8.37 = average wins per run). Whether the client integer is that value 
 an unrelated internal quantity cannot be established offline; it needs one reading from a live client
 whose leaderboard standing is known. Until then the two must not be displayed in the same units.
 
+### 18. The 0.1.9 re-fit: HDT 1.55.3's card pool, and what it did NOT cause (2026-08-09)
+
+The CI reference HDT moved 1.53.14 → 1.55.3 (HearthDb 36.0.4.0 → 36.2.0.0) and the committed pool
+with it: 7,321 → **7,324 cards**. The weights were re-fit and adopted. The point of recording this is
+the attribution, because the obvious reading of it is wrong.
+
+**Isolating the pool change from the data window.** Two refits were run against the SAME committed
+weights, differing only in which payload fed them:
+
+| payload | rows | max abs weight diff | pick flips vs committed |
+|---|---|---|---|
+| offline, snapshot payload, HearthDb 36.0.4 | 2,251 | — | 16.28% |
+| offline, **same** snapshot payload, HearthDb 36.2 | **2,438** | 0.30 | **3.30%** |
+| live fetch, HearthDb 36.2 | 2,206 | 1.11 | **14.98%** |
+
+The middle row is the pool change on its own: the newer HearthDb resolves **+187 more (card, class)
+rows** out of an unchanged payload, and moves 3.30% of same-class triples — barely over the 2% gate
+and a twentieth of the 29.89% resampling noise floor. So "≈200 new cards, of course it moved a lot"
+does not hold: the cards are in the middle row too, and it is the quietest of the three. The live
+row's 14.98% comes from HSReplay's own 4-day window having turned over, which is what every weekly
+retrain adopts anyway. Note the live payload covers FEWER pairs than the snapshot (2,206 < 2,438):
+row count tracks which cards saw play in the window, not how many HearthDb can resolve.
+
+The live fit was reproduced exactly on a runner and on a dev machine (identical weights, identical
+goldens), which is the determinism claim in §2 exercised across two machines rather than two runs.
+
+**Adopted goldens** (previous → new): Plated Beetle 24.63 → 22.47, Elven Archer 56.05 → 56.92,
+Defender of Argus 40.83 → 38.60, Fiery War Axe 50.33 → 54.61, Fireball 57.61 → 54.35, Coldlight
+Oracle 43.29 → 44.37, Dire Frenzy 50.88 → 48.21, Northshire Cleric 47.36 → 43.08, Dark Iron Dwarf
+28.86 → 30.53, Deathwing 0.00 → **9.32**. Deathwing coming off the clamp floor is worth a note: a
+0.00 golden asserts only "at or below zero", so it could have hidden further drift downward.
+
+**`ModelOnlyShrink` measured 0.095 — the fifth reading, and not a new question.** This fit's
+thin-decile calibration slope fell to 0.057 against the random holdout's 0.606. The runtime keeps
+the hardcoded 0.34, which is the standing decision recorded above (§14's re-fit notes) rather than a
+fresh call: the series is now **0.339 · 0.263 · 0.471 · 0.390 · 0.095**, and 0.34 sits among the
+first four. Read as a whole it is a statistic wandering, exactly as that note says, and tonight's
+value is its low outlier — which is the case for leaving it alone, since adopting a single reading is
+what the note refuses. The unchanged prerequisite for ever acting on it: give `thinSlope` an
+interval (bootstrap it, or repeat it the way `randomScores` is repeated). Until then it is a
+direction, not a measurement, and a direction taken from ~90 cards in one 4-day window would have
+shrunk every unmeasured card almost to 50 on this run alone.
+
 ## Known limitations
 
 1. Target = win-rate of the deck that includes the card: correlational, not causal (draft

@@ -32,22 +32,23 @@ namespace HdtArenaHelper.Tests
 		/// </summary>
 		public static TheoryData<CardEntry, double> Goldens => new TheoryData<CardEntry, double>
 		{
-			{ HSCard.PlatedBeetle, 24.63 },      // vanilla-ish minion
-			{ HSCard.ElvenArcher, 56.05 },       // battlecry damage
-			{ HSCard.DefenderOfArgus, 40.83 },   // buff + taunt text
-			{ HSCard.FieryWarAxe, 50.33 },       // the weapon path
-			{ HSCard.Fireball, 57.61 },          // spell with a damage magnitude
-			{ HSCard.ColdlightOracle, 43.29 },   // draw text
-			{ HSCard.DireFrenzy, 50.88 },        // buff spell
-			{ HSCard.NorthshireCleric, 47.36 },  // persistent draw
-			{ HSCard.DarkIronDwarf, 28.86 },     // conditional buff
+			{ HSCard.PlatedBeetle, 22.47 },      // vanilla-ish minion
+			{ HSCard.ElvenArcher, 56.92 },       // battlecry damage
+			{ HSCard.DefenderOfArgus, 38.60 },   // buff + taunt text
+			{ HSCard.FieryWarAxe, 54.61 },       // the weapon path
+			{ HSCard.Fireball, 54.35 },          // spell with a damage magnitude
+			{ HSCard.ColdlightOracle, 44.37 },   // draw text
+			{ HSCard.DireFrenzy, 48.21 },        // buff spell
+			{ HSCard.NorthshireCleric, 43.08 },  // persistent draw
+			{ HSCard.DarkIronDwarf, 30.53 },     // conditional buff
 
 			// The LEGENDARY of the set, and a card whose statline is genuinely bad. It went 16.01 ->
 			// 5.12 when `is_legendary` was removed (the label alone had been worth ~10 display points),
-			// and it sits at the clamp floor under the single-source fit. A 0 here is not a bug: it is
-			// a 10-mana 12/12 that hands the opponent the board, scored by a model that no longer gets
-			// to like it for being rare.
-			{ HSCard.Deathwing, 0.00 },
+			// and it sat at the clamp floor under the first single-source fit. It is off the floor
+			// again here, which is what a golden at the boundary is for: a 0.00 says only "at or below
+			// zero", so the same literal could hide a model drifting further down. A 10-mana 12/12 that
+			// hands the opponent the board still scores near the bottom of the pool.
+			{ HSCard.Deathwing, 9.32 },
 		};
 
 		[Theory]

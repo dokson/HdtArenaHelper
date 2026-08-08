@@ -13,8 +13,6 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      # Pinned official HDT version whose reference assemblies we build against.
-      HDT_VERSION: '1.53.14'
     steps:
       - uses: actions/checkout@v7
 
@@ -22,11 +20,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'  # keep in step with global.json
 
+      # The pin lives in hdt-version.txt and nowhere else: it used to be a literal in each of the
+      # four workflows plus resolve-hdt.ps1, five copies that had to agree by hand.
       - name: Resolve pinned HDT reference assemblies
         id: hdt
         shell: pwsh
         run: |
-          $path = .\scripts\resolve-hdt.ps1 -Version $env:HDT_VERSION
+          $path = .\scripts\resolve-hdt.ps1
           "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Read plugin version

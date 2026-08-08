@@ -11,7 +11,7 @@ on:
     - cron: '0 6 * * 5'
 
 # One retrain at a time: a workflow_dispatch racing the Friday cron would otherwise both
-# force-push retrain/<date> and then both try to open the same PR.
+# force-push the retrain branch and then both try to open the same PR.
 concurrency:
   group: retrain
   cancel-in-progress: false
@@ -24,7 +24,6 @@ jobs:
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
-      HDT_VERSION: '1.53.14'
     steps:
       - uses: actions/checkout@v7
 
@@ -36,7 +35,7 @@ jobs:
         id: hdt
         shell: pwsh
         run: |
-          $path = .\scripts\resolve-hdt.ps1 -Version $env:HDT_VERSION
+          $path = .\scripts\resolve-hdt.ps1
           "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       # Live fetch: HSReplay via curl (Cloudflare 403s the .NET stack; runner IPs may
@@ -119,13 +118,18 @@ jobs:
                      elseif($buildOk) { 'FAIL — goldens must be updated from the trainer output before merging' }
                      else { 'FAIL — the build itself broke against the new weights' }
           Write-Host "GOLDEN GATE: $verdict"
-          $branch = "retrain/$(Get-Date -Format yyyy-MM-dd)"
+          # ONE branch for every run, not retrain/<date>. A dated branch opens a new PR each week
+          # while the previous one stays open with weights that are already stale — two open
+          # retrain PRs is what this repo actually had, and the older one can only be merged by
+          # someone who has not noticed it is superseded. A single reused branch means there is
+          # always exactly one retrain PR, showing the latest fit.
+          $branch = 'retrain'
+          $title = "Retrain heuristic weights ($(Get-Date -Format yyyy-MM-dd))"
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          # The branch may already exist from an earlier run on the same day (checkout -b would
-          # fail). Only this workflow ever writes retrain/<date>, and a same-day re-run is meant
-          # to replace it, so a plain force is correct here — --force-with-lease would trip on
-          # "stale info" when the remote branch does not exist yet.
+          # The branch exists from every earlier run (checkout -b would fail), and each run
+          # REPLACES it rather than stacking on it, so a plain force is correct here —
+          # --force-with-lease would trip on "stale info" when the remote branch does not exist yet.
           git checkout -B $branch
           git add $committed
           git commit -m 'Retrain heuristic weights against live arena data'
@@ -143,16 +147,17 @@ jobs:
           $diff
           ~~~
           "@ | Out-File pr-body.md -Encoding utf8
-          # A same-day re-run has already force-pushed this branch, so `gh pr create` would fail
-          # with "a pull request for branch ... already exists" AFTER the push — leaving new
-          # commits under a PR a human may be mid-review on, and a red job. Update the existing
-          # PR body instead when there is one.
+          # The branch is reused, so after the first run there is always a PR open on it and
+          # `gh pr create` would fail with "a pull request for branch ... already exists" AFTER the
+          # push — leaving new commits under a PR a human may be mid-review on, and a red job. Retitle
+          # as well as re-body: the title carries the fit's date, and a stale one makes a refreshed PR
+          # look like last month's.
           $existing = gh pr list --repo '${{ github.repository }}' --head $branch --state open --json number --jq '.[0].number'
           if ($existing) {
-            gh pr edit $existing --repo '${{ github.repository }}' --body-file pr-body.md
+            gh pr edit $existing --repo '${{ github.repository }}' --title $title --body-file pr-body.md
             Write-Host "Updated existing retrain PR #$existing."
           } else {
-            gh pr create --title "Retrain heuristic weights ($(Get-Date -Format yyyy-MM-dd))" --body-file pr-body.md --repo '${{ github.repository }}'
+            gh pr create --title $title --body-file pr-body.md --repo '${{ github.repository }}'
           }
 
       # On a golden-gate FAIL the reviewer needs the trainer output and the test log, not just the
